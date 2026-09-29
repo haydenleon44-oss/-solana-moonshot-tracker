@@ -1,12 +1,13 @@
+
 import streamlit as st
 import pandas as pd
 import requests
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client
 
 # ============================================================
-# PAGE
+# CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -15,25 +16,37 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🚀 Solana Trade Radar")
+st.title("🚀 Solana Trade Radar LIVE")
 st.caption(
-    "Find strong early-momentum setups and detect when momentum begins to break down."
+    "30-second momentum monitoring • expanded Solana discovery • "
+    "acceleration detection • persistent trade research"
 )
 
 BASE = "https://api.dexscreener.com"
 
-DISCOVERY_URLS = {
-    "Latest": f"{BASE}/token-profiles/latest/v1",
-    "Recent": f"{BASE}/token-profiles/recent-updates/v1",
-    "Community": f"{BASE}/community-takeovers/latest/v1",
-    "Boosts": f"{BASE}/token-boosts/latest/v1",
-}
+DISCOVERY_URLS = [
+    f"{BASE}/token-profiles/latest/v1",
+    f"{BASE}/token-profiles/recent-updates/v1",
+    f"{BASE}/community-takeovers/latest/v1",
+    f"{BASE}/token-boosts/latest/v1",
+    f"{BASE}/token-boosts/top/v1",
+    f"{BASE}/ads/latest/v1",
+]
 
 TOKEN_URL = f"{BASE}/latest/dex/tokens/{{}}"
 
+# Discovery can consider a much larger pool.
+MAX_DISCOVERY_POOL = 200
+
+# Each 30-second cycle prioritizes this many contracts.
+MAX_LIVE_SCAN = 75
+
+# Previously discovered coins can remain in rotation.
+MAX_TRACKED_ROTATION = 75
+
 
 # ============================================================
-# DATABASE
+# SUPABASE
 # ============================================================
 
 @st.cache_resource
@@ -52,42 +65,47 @@ db = get_db()
 # ============================================================
 
 @st.cache_resource
-def get_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "SolanaTradeRadar/3.0"
+def get_http():
+    session = requests.Session()
+
+    session.headers.update({
+        "User-Agent": "SolanaTradeRadar/4.0"
     })
-    return s
+
+    return session
 
 
-http = get_session()
+http = get_http()
 
 
-def api_get(url, retries=3):
+def api_get(url, attempts=3):
 
-    for attempt in range(retries):
+    for attempt in range(attempts):
 
         try:
-
-            r = http.get(
+            response = http.get(
                 url,
                 timeout=10
             )
 
-            if r.status_code == 429:
-                time.sleep(1.5 * (attempt + 1))
+            if response.status_code == 429:
+                time.sleep(
+                    1.5 * (attempt + 1)
+                )
                 continue
 
-            r.raise_for_status()
+            response.raise_for_status()
 
-            return r.json()
+            return response.json()
 
         except requests.RequestException:
 
-            if attempt == retries - 1:
+            if attempt == attempts - 1:
                 return None
 
-            time.sleep(0.5 * (attempt + 1))
+            time.sleep(
+                0.5 * (attempt + 1)
+            )
 
     return None
 
@@ -97,20 +115,23 @@ def api_get(url, retries=3):
 # ============================================================
 
 def num(value):
-
     try:
         return float(value or 0)
-
     except (ValueError, TypeError):
         return 0.0
 
 
 def clamp(value, low, high):
-    return max(low, min(high, value))
+    return max(
+        low,
+        min(high, value)
+    )
 
 
-def now_utc():
-    return datetime.now(timezone.utc)
+def utc_now():
+    return datetime.now(
+        timezone.utc
+    )
 
 
 def parse_time(value):
@@ -138,22 +159,22 @@ def parse_time(value):
         return None
 
 
-def age_minutes(timestamp):
+def age_minutes(timestamp_ms):
 
-    if not timestamp:
+    if not timestamp_ms:
         return 999999
 
     try:
 
         created = datetime.fromtimestamp(
-            float(timestamp) / 1000,
+            float(timestamp_ms) / 1000,
             timezone.utc
         )
 
         return max(
             0,
             (
-                now_utc() - created
+                utc_now() - created
             ).total_seconds() / 60
         )
 
@@ -164,7 +185,7 @@ def age_minutes(timestamp):
 def age_text(minutes):
 
     if minutes >= 999999:
-        return "Unknown"
+        return "?"
 
     if minutes < 60:
         return f"{int(minutes)}m"
@@ -175,37 +196,38 @@ def age_text(minutes):
     return f"{minutes / 1440:.1f}d"
 
 
-def percent_return(start, current):
+def pct_change(old, new):
 
-    start = num(start)
-    current = num(current)
+    old = num(old)
+    new = num(new)
 
-    if start <= 0 or current <= 0:
-        return None
+    if old <= 0:
+        return 0.0
 
     return (
-        (current / start) - 1
+        (new - old)
+        / old
     ) * 100
 
 
 # ============================================================
-# DISCOVERY
+# DISCOVERY ENGINE
 # ============================================================
 
-def extract_addresses(data):
+def extract_addresses(payload):
 
-    addresses = set()
+    addresses = []
 
-    if not data:
+    if not payload:
         return addresses
 
-    if isinstance(data, dict):
-        data = [data]
+    if isinstance(payload, dict):
+        payload = [payload]
 
-    if not isinstance(data, list):
+    if not isinstance(payload, list):
         return addresses
 
-    for item in data:
+    for item in payload:
 
         if not isinstance(item, dict):
             continue
@@ -218,29 +240,102 @@ def extract_addresses(data):
         )
 
         if address:
-            addresses.add(address)
+            addresses.append(address)
 
     return addresses
 
 
-@st.cache_data(ttl=20)
-def discover():
+@st.cache_data(ttl=120)
+def discover_tokens():
 
-    addresses = set()
+    ordered = []
 
-    for url in DISCOVERY_URLS.values():
+    seen = set()
 
-        data = api_get(url)
+    for url in DISCOVERY_URLS:
 
-        addresses.update(
-            extract_addresses(data)
-        )
+        payload = api_get(url)
 
-    return list(addresses)
+        for address in extract_addresses(
+            payload
+        ):
+
+            if address not in seen:
+
+                seen.add(address)
+                ordered.append(address)
+
+    return ordered[
+        :MAX_DISCOVERY_POOL
+    ]
 
 
 # ============================================================
-# PAIR DATA
+# EXISTING TRACKED CONTRACTS
+# ============================================================
+
+def load_history():
+
+    try:
+
+        result = (
+            db.table("token_history")
+            .select("*")
+            .order(
+                "detected_at",
+                desc=True
+            )
+            .limit(500)
+            .execute()
+        )
+
+        return result.data or []
+
+    except Exception:
+        return []
+
+
+def recent_tracked_addresses(
+    records
+):
+
+    now = utc_now()
+
+    addresses = []
+
+    for record in records:
+
+        address = record.get(
+            "address"
+        )
+
+        detected = parse_time(
+            record.get(
+                "detected_at"
+            )
+        )
+
+        if (
+            not address
+            or not detected
+        ):
+            continue
+
+        age = (
+            now - detected
+        ).total_seconds() / 3600
+
+        # Prioritize coins from last 24h.
+        if age <= 24:
+            addresses.append(address)
+
+    return addresses[
+        :MAX_TRACKED_ROTATION
+    ]
+
+
+# ============================================================
+# PAIR FETCH
 # ============================================================
 
 def best_pair(address):
@@ -252,32 +347,83 @@ def best_pair(address):
     if not data:
         return None
 
-    pairs = data.get("pairs") or []
+    pairs = data.get(
+        "pairs"
+    ) or []
 
-    solana = [
-        p for p in pairs
-        if p.get("chainId") == "solana"
+    solana_pairs = [
+        pair
+        for pair in pairs
+        if pair.get(
+            "chainId"
+        ) == "solana"
     ]
 
-    if not solana:
+    if not solana_pairs:
         return None
 
     return max(
-        solana,
-        key=lambda p: num(
-            (p.get("liquidity") or {})
-            .get("usd")
+        solana_pairs,
+        key=lambda pair: num(
+            (
+                pair.get(
+                    "liquidity"
+                ) or {}
+            ).get("usd")
         )
     )
+
+
+# ============================================================
+# PREVIOUS SNAPSHOT
+# ============================================================
+
+def previous_snapshot(
+    address
+):
+
+    try:
+
+        result = (
+            db.table(
+                "token_snapshots"
+            )
+            .select("*")
+            .eq(
+                "address",
+                address
+            )
+            .order(
+                "recorded_at",
+                desc=True
+            )
+            .limit(1)
+            .execute()
+        )
+
+        if result.data:
+            return result.data[0]
+
+    except Exception:
+        pass
+
+    return None
 
 
 # ============================================================
 # ANALYSIS ENGINE
 # ============================================================
 
-def analyze(address, pair):
+def analyze_token(
+    address,
+    pair,
+    previous
+):
 
-    base = pair.get("baseToken") or {}
+    base = (
+        pair.get("baseToken")
+        or {}
+    )
 
     symbol = (
         base.get("symbol")
@@ -289,8 +435,10 @@ def analyze(address, pair):
     )
 
     liquidity = num(
-        (pair.get("liquidity") or {})
-        .get("usd")
+        (
+            pair.get("liquidity")
+            or {}
+        ).get("usd")
     )
 
     market_cap = num(
@@ -298,7 +446,10 @@ def analyze(address, pair):
         or pair.get("fdv")
     )
 
-    volume = pair.get("volume") or {}
+    volume = (
+        pair.get("volume")
+        or {}
+    )
 
     volume5 = num(
         volume.get("m5")
@@ -309,8 +460,9 @@ def analyze(address, pair):
     )
 
     changes = (
-        pair.get("priceChange")
-        or {}
+        pair.get(
+            "priceChange"
+        ) or {}
     )
 
     change5 = num(
@@ -321,10 +473,20 @@ def analyze(address, pair):
         changes.get("h1")
     )
 
-    txns = pair.get("txns") or {}
+    txns = (
+        pair.get("txns")
+        or {}
+    )
 
-    tx5 = txns.get("m5") or {}
-    tx1h = txns.get("h1") or {}
+    tx5 = (
+        txns.get("m5")
+        or {}
+    )
+
+    tx1 = (
+        txns.get("h1")
+        or {}
+    )
 
     buys5 = int(
         num(tx5.get("buys"))
@@ -334,31 +496,38 @@ def analyze(address, pair):
         num(tx5.get("sells"))
     )
 
-    buys1h = int(
-        num(tx1h.get("buys"))
+    buys1 = int(
+        num(tx1.get("buys"))
     )
 
-    sells1h = int(
-        num(tx1h.get("sells"))
+    sells1 = int(
+        num(tx1.get("sells"))
     )
 
-    trades5 = buys5 + sells5
-    trades1h = buys1h + sells1h
+    trades5 = (
+        buys5 + sells5
+    )
+
+    trades1 = (
+        buys1 + sells1
+    )
 
     buy_ratio = (
         buys5 / trades5
-        if trades5 > 0
+        if trades5
         else 0
     )
 
-    buy_ratio1h = (
-        buys1h / trades1h
-        if trades1h > 0
+    buy_ratio1 = (
+        buys1 / trades1
+        if trades1
         else 0
     )
 
     age = age_minutes(
-        pair.get("pairCreatedAt")
+        pair.get(
+            "pairCreatedAt"
+        )
     )
 
     liquidity_ratio = (
@@ -374,62 +543,114 @@ def analyze(address, pair):
     )
 
     # ========================================================
-    # DATA QUALITY
+    # CHANGE SINCE PREVIOUS 30s OBSERVATION
     # ========================================================
 
-    data_quality = 100
-
-    if price <= 0:
-        data_quality -= 100
-
-    if liquidity <= 0:
-        data_quality -= 70
-
-    if market_cap <= 0:
-        data_quality -= 10
-
-    if trades5 == 0:
-        data_quality -= 20
-
-    data_quality = int(
-        clamp(
-            data_quality,
-            0,
-            100
+    previous_volume = num(
+        previous.get(
+            "volume_5m"
         )
+        if previous
+        else 0
+    )
+
+    previous_buy_ratio = num(
+        previous.get(
+            "buy_ratio"
+        )
+        if previous
+        else 0
+    )
+
+    previous_liquidity = num(
+        previous.get(
+            "liquidity"
+        )
+        if previous
+        else 0
+    )
+
+    previous_price = num(
+        previous.get(
+            "price"
+        )
+        if previous
+        else 0
+    )
+
+    previous_momentum = num(
+        previous.get(
+            "momentum"
+        )
+        if previous
+        else 0
+    )
+
+    volume_accel = (
+        pct_change(
+            previous_volume,
+            volume5
+        )
+        if previous_volume > 0
+        else 0
+    )
+
+    buy_pressure_change = (
+        (buy_ratio - previous_buy_ratio)
+        * 100
+        if previous
+        else 0
+    )
+
+    liquidity_change = (
+        pct_change(
+            previous_liquidity,
+            liquidity
+        )
+        if previous_liquidity > 0
+        else 0
+    )
+
+    price_since_scan = (
+        pct_change(
+            previous_price,
+            price
+        )
+        if previous_price > 0
+        else 0
     )
 
     # ========================================================
     # MOMENTUM
     # ========================================================
 
-    momentum = 0
+    momentum = 0.0
 
     momentum += min(
-        20,
-        trades5 * 0.4
+        18,
+        trades5 * 0.35
     )
 
     if trades5 >= 5:
 
         if buy_ratio >= 0.70:
-            momentum += 20
+            momentum += 18
 
         elif buy_ratio >= 0.62:
-            momentum += 14
+            momentum += 13
 
         elif buy_ratio >= 0.55:
-            momentum += 8
+            momentum += 7
 
         elif buy_ratio < 0.42:
             momentum -= 12
 
-    if trades1h >= 15:
+    if trades1 >= 15:
 
-        if buy_ratio1h >= 0.60:
+        if buy_ratio1 >= 0.60:
             momentum += 7
 
-        elif buy_ratio1h < 0.43:
+        elif buy_ratio1 < 0.43:
             momentum -= 7
 
     if volume5 >= 50000:
@@ -451,7 +672,7 @@ def analyze(address, pair):
         momentum += 13
 
     elif 35 < change5 <= 75:
-        momentum += 7
+        momentum += 8
 
     elif change5 > 150:
         momentum -= 10
@@ -465,10 +686,31 @@ def analyze(address, pair):
     elif age <= 120:
         momentum += 5
 
-    if change5 < -10:
+    # Acceleration bonuses.
+    if previous:
+
+        if volume_accel >= 25:
+            momentum += 8
+
+        elif volume_accel >= 10:
+            momentum += 4
+
+        if buy_pressure_change >= 5:
+            momentum += 7
+
+        elif buy_pressure_change <= -8:
+            momentum -= 8
+
+        if price_since_scan > 3:
+            momentum += 5
+
+        if liquidity_change >= 5:
+            momentum += 4
+
+    if change5 <= -10:
         momentum -= 15
 
-    if change5 < -20:
+    if change5 <= -20:
         momentum -= 15
 
     momentum = int(
@@ -477,6 +719,13 @@ def analyze(address, pair):
             0,
             100
         )
+    )
+
+    momentum_change = (
+        momentum
+        - previous_momentum
+        if previous
+        else 0
     )
 
     # ========================================================
@@ -524,7 +773,10 @@ def analyze(address, pair):
 
     risk = 35
 
-    if liquidity < 3000:
+    if liquidity <= 0:
+        risk = 100
+
+    elif liquidity < 3000:
         risk += 45
 
     elif liquidity < 5000:
@@ -573,8 +825,12 @@ def analyze(address, pair):
     elif turnover > 12:
         risk += 10
 
-    if data_quality < 70:
-        risk += 30
+    # Sudden liquidity loss.
+    if (
+        previous
+        and liquidity_change <= -20
+    ):
+        risk += 25
 
     risk = int(
         clamp(
@@ -585,13 +841,13 @@ def analyze(address, pair):
     )
 
     # ========================================================
-    # DETERIORATION / EXIT ENGINE
+    # DETERIORATION
     # ========================================================
 
     deterioration = 0
 
     if change5 < -5:
-        deterioration += 20
+        deterioration += 15
 
     if change5 < -12:
         deterioration += 20
@@ -603,16 +859,30 @@ def analyze(address, pair):
         sells5 > buys5
         and trades5 >= 8
     ):
-        deterioration += 20
+        deterioration += 15
 
     if (
         buy_ratio < 0.40
         and trades5 >= 10
     ):
-        deterioration += 20
+        deterioration += 15
 
-    if momentum < 30:
-        deterioration += 10
+    if previous:
+
+        if momentum_change <= -15:
+            deterioration += 20
+
+        elif momentum_change <= -8:
+            deterioration += 10
+
+        if buy_pressure_change <= -10:
+            deterioration += 15
+
+        if price_since_scan <= -5:
+            deterioration += 15
+
+        if liquidity_change <= -15:
+            deterioration += 20
 
     deterioration = int(
         clamp(
@@ -626,24 +896,24 @@ def analyze(address, pair):
     # SETUP SCORE
     # ========================================================
 
-    setup_score = (
+    score = (
         momentum * 0.55
         + liquidity_score * 0.20
         + (100 - risk) * 0.25
     ) / 10
 
     if liquidity < 5000:
-        setup_score -= 2
+        score -= 2
 
     if risk >= 75:
-        setup_score -= 1.5
+        score -= 1.5
 
     if deterioration >= 50:
-        setup_score -= 1
+        score -= 1
 
-    setup_score = round(
+    score = round(
         clamp(
-            setup_score,
+            score,
             1,
             10
         ),
@@ -651,19 +921,54 @@ def analyze(address, pair):
     )
 
     # ========================================================
-    # SIMPLE ACTION
+    # TREND
+    # ========================================================
+
+    if not previous:
+
+        trend = "🆕 NEW"
+
+    elif (
+        momentum_change >= 10
+        and buy_pressure_change > 0
+    ):
+
+        trend = "🚀 ACCELERATING"
+
+    elif (
+        momentum_change >= 4
+        or (
+            price_since_scan > 0
+            and buy_pressure_change > 0
+        )
+    ):
+
+        trend = "📈 STRENGTHENING"
+
+    elif (
+        momentum_change <= -10
+        or buy_pressure_change <= -8
+    ):
+
+        trend = "📉 FADING"
+
+    else:
+
+        trend = "➡️ STEADY"
+
+    # ========================================================
+    # SIMPLE ACTION ENGINE
     # ========================================================
 
     if (
-        data_quality < 60
-        or liquidity < 3000
+        liquidity < 3000
         or risk >= 85
     ):
 
         action = "⛔ AVOID"
 
         reason = (
-            "Very high risk or weak market data"
+            "Liquidity/risk conditions fail the safety screen."
         )
 
     elif deterioration >= 70:
@@ -671,7 +976,7 @@ def analyze(address, pair):
         action = "🔴 EXIT WARNING"
 
         reason = (
-            "Momentum and buyer strength are breaking down"
+            "Multiple momentum deterioration signals are active."
         )
 
     elif deterioration >= 45:
@@ -679,36 +984,45 @@ def analyze(address, pair):
         action = "🟠 WEAKENING"
 
         reason = (
-            "Selling pressure or momentum deterioration detected"
+            "Momentum or buyer strength is deteriorating."
         )
 
     elif (
-        setup_score >= 7.5
+        score >= 7.5
         and momentum >= 75
         and risk <= 50
         and liquidity >= 10000
         and buy_ratio >= 0.60
         and change5 > 0
+        and (
+            trend
+            in [
+                "🚀 ACCELERATING",
+                "📈 STRENGTHENING",
+                "🆕 NEW"
+            ]
+        )
     ):
 
         action = "🟢 STRONG SETUP"
 
         reason = (
-            "Strong momentum, buyer pressure and usable liquidity"
+            "High momentum, buyer pressure and liquidity with "
+            "positive short-term behavior."
         )
 
     elif (
-        setup_score >= 6
-        and momentum >= 60
+        score >= 6
+        and momentum >= 58
         and risk <= 65
         and liquidity >= 5000
-        and buy_ratio >= 0.55
+        and buy_ratio >= 0.54
     ):
 
         action = "🟡 WATCH"
 
         reason = (
-            "Promising activity but confirmation is still developing"
+            "Promising activity, but stronger confirmation is needed."
         )
 
     else:
@@ -716,29 +1030,50 @@ def analyze(address, pair):
         action = "⚪ WAIT"
 
         reason = (
-            "No strong setup currently detected"
+            "No high-confidence momentum setup detected."
         )
 
     return {
         "Token": symbol,
+        "Address": address,
         "Action": action,
-        "Score": setup_score,
+        "Trend": trend,
         "Reason": reason,
-        "Age": age_text(age),
-        "Age Minutes": age,
+        "Score": score,
         "Momentum": momentum,
+        "Momentum Δ": round(
+            momentum_change,
+            1
+        ),
         "Risk": risk,
-        "Liquidity Quality": liquidity_score,
         "Deterioration": deterioration,
-        "Liquidity": round(liquidity),
+        "Liquidity Quality": liquidity_score,
+        "Price": price,
         "Market Cap": round(market_cap),
+        "Liquidity": round(liquidity),
         "5m Volume": round(volume5),
+        "5m Buys": buys5,
+        "5m Sells": sells5,
         "Buy %": round(
             buy_ratio * 100,
             1
         ),
-        "5m Buys": buys5,
-        "5m Sells": sells5,
+        "Buy Pressure Δ": round(
+            buy_pressure_change,
+            1
+        ),
+        "Volume Δ": round(
+            volume_accel,
+            1
+        ),
+        "Liquidity Δ": round(
+            liquidity_change,
+            1
+        ),
+        "30s Price Δ": round(
+            price_since_scan,
+            2
+        ),
         "5m Change %": round(
             change5,
             2
@@ -747,189 +1082,252 @@ def analyze(address, pair):
             change1h,
             2
         ),
-        "Price": price,
-        "Address": address,
+        "Age": age_text(age),
+        "Age Minutes": age,
     }
 
 
 # ============================================================
-# SCAN
+# SAVE SNAPSHOT
 # ============================================================
 
-@st.cache_data(ttl=20)
-def scan():
-
-    addresses = discover()
-
-    rows = []
-
-    for address in addresses[:60]:
-
-        pair = best_pair(address)
-
-        if not pair:
-            continue
-
-        try:
-
-            result = analyze(
-                address,
-                pair
-            )
-
-            if result["Price"] > 0:
-                rows.append(result)
-
-        except Exception:
-            continue
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-
-    return (
-        df
-        .drop_duplicates("Address")
-        .sort_values(
-            ["Score", "Momentum"],
-            ascending=False
-        )
-    )
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-def load_history():
+def save_snapshot(coin):
 
     try:
 
-        response = (
-            db.table("token_history")
-            .select("*")
-            .order(
-                "detected_at",
-                desc=True
-            )
-            .limit(500)
-            .execute()
-        )
+        db.table(
+            "token_snapshots"
+        ).insert({
+            "address":
+                coin["Address"],
 
-        return response.data or []
+            "token":
+                coin["Token"],
+
+            "recorded_at":
+                utc_now().isoformat(),
+
+            "price":
+                float(
+                    coin["Price"]
+                ),
+
+            "market_cap":
+                float(
+                    coin["Market Cap"]
+                ),
+
+            "liquidity":
+                float(
+                    coin["Liquidity"]
+                ),
+
+            "volume_5m":
+                float(
+                    coin["5m Volume"]
+                ),
+
+            "buys_5m":
+                int(
+                    coin["5m Buys"]
+                ),
+
+            "sells_5m":
+                int(
+                    coin["5m Sells"]
+                ),
+
+            "buy_ratio":
+                float(
+                    coin["Buy %"]
+                ) / 100,
+
+            "price_change_5m":
+                float(
+                    coin["5m Change %"]
+                ),
+
+            "momentum":
+                int(
+                    coin["Momentum"]
+                ),
+
+            "risk":
+                int(
+                    coin["Risk"]
+                ),
+
+            "deterioration":
+                int(
+                    coin["Deterioration"]
+                ),
+
+            "setup_score":
+                float(
+                    coin["Score"]
+                ),
+        }).execute()
 
     except Exception:
-        return []
+        pass
 
 
-def save_new_tokens(
-    tokens,
-    records
+# ============================================================
+# SAVE FIRST DETECTION
+# ============================================================
+
+def save_history_if_new(
+    coin,
+    known_addresses
 ):
 
-    known = {
-        row.get("address")
-        for row in records
+    address = coin["Address"]
+
+    if address in known_addresses:
+        return
+
+    try:
+
+        db.table(
+            "token_history"
+        ).insert({
+            "address":
+                address,
+
+            "token":
+                coin["Token"],
+
+            "detected_at":
+                utc_now().isoformat(),
+
+            "start_price":
+                float(
+                    coin["Price"]
+                ),
+
+            "start_moonshot":
+                float(
+                    coin["Score"]
+                ),
+
+            "start_momentum":
+                int(
+                    coin["Momentum"]
+                ),
+
+            "start_risk":
+                int(
+                    coin["Risk"]
+                ),
+
+            "start_status":
+                coin["Action"],
+
+            "latest_return":
+                0.0,
+
+            "best_return":
+                0.0,
+
+            "worst_return":
+                0.0,
+
+            "last_price":
+                float(
+                    coin["Price"]
+                ),
+
+            "last_updated":
+                utc_now().isoformat(),
+        }).execute()
+
+        known_addresses.add(
+            address
+        )
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# UPDATE PERFORMANCE HISTORY
+# ============================================================
+
+def update_performance(
+    coin,
+    record
+):
+
+    if not record:
+        return
+
+    start_price = num(
+        record.get(
+            "start_price"
+        )
+    )
+
+    detected = parse_time(
+        record.get(
+            "detected_at"
+        )
+    )
+
+    current = num(
+        coin["Price"]
+    )
+
+    if (
+        start_price <= 0
+        or current <= 0
+        or not detected
+    ):
+        return
+
+    performance = pct_change(
+        start_price,
+        current
+    )
+
+    performance = round(
+        performance,
+        2
+    )
+
+    elapsed = (
+        utc_now() - detected
+    ).total_seconds() / 60
+
+    updates = {
+        "latest_return":
+            performance,
+
+        "best_return":
+            max(
+                num(
+                    record.get(
+                        "best_return"
+                    )
+                ),
+                performance
+            ),
+
+        "worst_return":
+            min(
+                num(
+                    record.get(
+                        "worst_return"
+                    )
+                ),
+                performance
+            ),
+
+        "last_price":
+            current,
+
+        "last_updated":
+            utc_now().isoformat(),
     }
-
-    now = now_utc()
-
-    for _, coin in tokens.iterrows():
-
-        address = coin["Address"]
-
-        if (
-            not address
-            or address in known
-        ):
-            continue
-
-        try:
-
-            (
-                db.table("token_history")
-                .insert({
-                    "address":
-                        address,
-
-                    "token":
-                        coin["Token"],
-
-                    "detected_at":
-                        now.isoformat(),
-
-                    "start_price":
-                        float(
-                            coin["Price"]
-                        ),
-
-                    "start_moonshot":
-                        float(
-                            coin["Score"]
-                        ),
-
-                    "start_momentum":
-                        int(
-                            coin["Momentum"]
-                        ),
-
-                    "start_risk":
-                        int(
-                            coin["Risk"]
-                        ),
-
-                    "start_status":
-                        coin["Action"],
-
-                    "latest_return":
-                        0.0,
-
-                    "best_return":
-                        0.0,
-
-                    "worst_return":
-                        0.0,
-
-                    "last_price":
-                        float(
-                            coin["Price"]
-                        ),
-
-                    "last_updated":
-                        now.isoformat(),
-                })
-                .execute()
-            )
-
-            known.add(address)
-
-        except Exception:
-            continue
-
-
-# ============================================================
-# TRACK OLD TOKENS
-# ============================================================
-
-def update_history(
-    records,
-    live_tokens
-):
-
-    now = now_utc()
-
-    live_prices = {}
-
-    if not live_tokens.empty:
-
-        live_prices = {
-            row["Address"]:
-                num(row["Price"])
-
-            for _, row
-            in live_tokens.iterrows()
-        }
 
     checkpoints = {
         "return_5m": 5,
@@ -940,156 +1338,231 @@ def update_history(
         "return_24h": 1440,
     }
 
-    active = []
-
-    for record in records:
-
-        detected = parse_time(
-            record.get(
-                "detected_at"
-            )
-        )
-
-        if not detected:
-            continue
-
-        elapsed = (
-            now - detected
-        ).total_seconds() / 60
-
-        if elapsed <= 1500:
-
-            active.append(
-                (
-                    record,
-                    elapsed
-                )
-            )
-
-    for record, elapsed in active[:60]:
-
-        address = record.get(
-            "address"
-        )
-
-        start_price = num(
-            record.get(
-                "start_price"
-            )
-        )
+    for column, minutes in checkpoints.items():
 
         if (
-            not address
-            or start_price <= 0
+            elapsed >= minutes
+            and record.get(
+                column
+            ) is None
         ):
-            continue
 
-        current = live_prices.get(
-            address,
-            0
+            updates[column] = (
+                performance
+            )
+
+    try:
+
+        (
+            db.table(
+                "token_history"
+            )
+            .update(updates)
+            .eq(
+                "address",
+                coin["Address"]
+            )
+            .execute()
         )
 
-        if current <= 0:
+    except Exception:
+        pass
 
-            pair = best_pair(
+
+# ============================================================
+# BUILD ROTATING SCAN LIST
+# ============================================================
+
+def build_scan_addresses():
+
+    discovered = discover_tokens()
+
+    history = load_history()
+
+    tracked = (
+        recent_tracked_addresses(
+            history
+        )
+    )
+
+    combined = []
+
+    seen = set()
+
+    # New discoveries get first priority.
+    for address in discovered:
+
+        if address not in seen:
+
+            seen.add(address)
+            combined.append(address)
+
+    # Then tracked coins.
+    for address in tracked:
+
+        if address not in seen:
+
+            seen.add(address)
+            combined.append(address)
+
+    # Rotate through pool between fragment runs.
+    if "rotation_offset" not in st.session_state:
+        st.session_state.rotation_offset = 0
+
+    if not combined:
+        return [], 0
+
+    pool_size = len(combined)
+
+    start = (
+        st.session_state.rotation_offset
+        % pool_size
+    )
+
+    rotated = (
+        combined[start:]
+        + combined[:start]
+    )
+
+    selected = rotated[
+        :MAX_LIVE_SCAN
+    ]
+
+    st.session_state.rotation_offset = (
+        start
+        + MAX_LIVE_SCAN
+    ) % pool_size
+
+    return selected, pool_size
+
+
+# ============================================================
+# SCAN ONE LIVE CYCLE
+# ============================================================
+
+def live_scan():
+
+    addresses, pool_size = (
+        build_scan_addresses()
+    )
+
+    history = load_history()
+
+    history_map = {
+        row.get("address"): row
+        for row in history
+        if row.get("address")
+    }
+
+    known = set(
+        history_map.keys()
+    )
+
+    rows = []
+
+    for address in addresses:
+
+        pair = best_pair(address)
+
+        if not pair:
+            continue
+
+        # Ignore dead/no-liquidity pairs early.
+        liquidity = num(
+            (
+                pair.get(
+                    "liquidity"
+                ) or {}
+            ).get("usd")
+        )
+
+        if liquidity <= 0:
+            continue
+
+        previous = (
+            previous_snapshot(
                 address
             )
-
-            if pair:
-
-                current = num(
-                    pair.get(
-                        "priceUsd"
-                    )
-                )
-
-        if current <= 0:
-            continue
-
-        result = percent_return(
-            start_price,
-            current
         )
-
-        if result is None:
-            continue
-
-        result = round(
-            result,
-            2
-        )
-
-        old_best = num(
-            record.get(
-                "best_return"
-            )
-        )
-
-        old_worst = num(
-            record.get(
-                "worst_return"
-            )
-        )
-
-        updates = {
-            "latest_return":
-                result,
-
-            "best_return":
-                max(
-                    old_best,
-                    result
-                ),
-
-            "worst_return":
-                min(
-                    old_worst,
-                    result
-                ),
-
-            "last_price":
-                current,
-
-            "last_updated":
-                now.isoformat(),
-        }
-
-        for column, minutes in checkpoints.items():
-
-            if (
-                elapsed >= minutes
-                and record.get(column)
-                is None
-            ):
-
-                updates[column] = (
-                    result
-                )
 
         try:
 
-            (
-                db.table(
-                    "token_history"
-                )
-                .update(updates)
-                .eq(
-                    "address",
-                    address
-                )
-                .execute()
+            coin = analyze_token(
+                address,
+                pair,
+                previous
             )
 
         except Exception:
             continue
 
+        if coin["Price"] <= 0:
+            continue
+
+        rows.append(coin)
+
+        save_history_if_new(
+            coin,
+            known
+        )
+
+        save_snapshot(
+            coin
+        )
+
+        update_performance(
+            coin,
+            history_map.get(
+                address
+            )
+        )
+
+    if not rows:
+
+        return (
+            pd.DataFrame(),
+            pool_size
+        )
+
+    df = pd.DataFrame(
+        rows
+    )
+
+    df = (
+        df
+        .drop_duplicates(
+            "Address"
+        )
+        .sort_values(
+            [
+                "Score",
+                "Momentum"
+            ],
+            ascending=False
+        )
+    )
+
+    return df, pool_size
+
 
 # ============================================================
-# REFRESH
+# SIDEBAR
 # ============================================================
+
+st.sidebar.header(
+    "⚡ Live Scanner"
+)
+
+st.sidebar.success(
+    "AUTO REFRESH: 30 SECONDS"
+)
+
+st.sidebar.caption(
+    "Keep this page open for live 30-second monitoring."
+)
 
 if st.sidebar.button(
-    "🔄 Scan Now",
+    "🔄 Refresh Discovery Pool",
     use_container_width=True
 ):
 
@@ -1098,87 +1571,99 @@ if st.sidebar.button(
 
 
 # ============================================================
-# RUN
+# LIVE 30-SECOND DASHBOARD
 # ============================================================
 
-with st.spinner(
-    "Searching Solana markets..."
-):
-
-    tokens = scan()
-
-
-records = load_history()
-
-if not tokens.empty:
-
-    save_new_tokens(
-        tokens,
-        records
-    )
-
-
-records = load_history()
-
-update_history(
-    records,
-    tokens
+@st.fragment(
+    run_every="30s"
 )
+def live_dashboard():
 
-records = load_history()
+    scan_started = utc_now()
 
+    with st.spinner(
+        "Scanning live Solana markets..."
+    ):
 
-# ============================================================
-# SIMPLE DASHBOARD
-# ============================================================
+        tokens, pool_size = (
+            live_scan()
+        )
 
-if tokens.empty:
-
-    st.warning(
-        "No market data was returned."
+    st.caption(
+        "Last scan: "
+        + scan_started.strftime(
+            "%H:%M:%S UTC"
+        )
+        + " • next automatic scan ≈ 30 seconds"
     )
 
-else:
+    if tokens.empty:
+
+        st.warning(
+            "No usable token data was returned during this rotation."
+        )
+
+        return
 
     strong = tokens[
         tokens["Action"]
         == "🟢 STRONG SETUP"
-    ]
+    ].copy()
 
     watch = tokens[
         tokens["Action"]
         == "🟡 WATCH"
-    ]
+    ].copy()
 
-    exits = tokens[
+    accelerating = tokens[
+        tokens["Trend"].isin(
+            [
+                "🚀 ACCELERATING",
+                "📈 STRENGTHENING"
+            ]
+        )
+    ].copy()
+
+    danger = tokens[
         tokens["Action"].isin(
             [
                 "🔴 EXIT WARNING",
                 "🟠 WEAKENING"
             ]
         )
-    ]
+    ].copy()
 
-    c1, c2, c3, c4 = st.columns(4)
+    # ========================================================
+    # METRICS
+    # ========================================================
 
-    c1.metric(
-        "🟢 Strong Setups",
+    a, b, c, d, e = (
+        st.columns(5)
+    )
+
+    a.metric(
+        "🟢 Strong",
         len(strong)
     )
 
-    c2.metric(
+    b.metric(
+        "🚀 Accelerating",
+        len(accelerating)
+    )
+
+    c.metric(
         "🟡 Watch",
         len(watch)
     )
 
-    c3.metric(
+    d.metric(
         "🔴 Weakening",
-        len(exits)
+        len(danger)
     )
 
-    c4.metric(
-        "📡 Coins Scanned",
-        len(tokens)
+    e.metric(
+        "📡 Discovery Pool",
+        pool_size
     )
 
     # ========================================================
@@ -1189,58 +1674,101 @@ else:
         "🟢 Strong Setups"
     )
 
-    st.caption(
-        "Highest-quality setups detected by the current experimental model."
-    )
-
     if strong.empty:
 
         st.info(
-            "No strong setup right now. "
-            "The scanner is waiting instead of forcing a trade."
+            "No coin currently meets every Strong Setup requirement."
         )
 
     else:
 
-        for _, coin in strong.head(10).iterrows():
+        strong = strong.sort_values(
+            [
+                "Score",
+                "Momentum"
+            ],
+            ascending=False
+        )
+
+        for _, coin in strong.head(
+            10
+        ).iterrows():
 
             st.success(
                 f"""
-### {coin['Token']}
+### {coin['Token']} — {coin['Trend']}
 
-**🟢 STRONG SETUP**
-
-Signal strength: **{coin['Score']}/10**
+**Signal: {coin['Score']}/10**
 
 {coin['Reason']}
 
-Momentum: **{coin['Momentum']}/100**  
+Momentum: **{coin['Momentum']}/100** ({coin['Momentum Δ']:+.0f})  
 Risk: **{coin['Risk']}/100**  
-Buyer share: **{coin['Buy %']}%**  
+Buy share: **{coin['Buy %']}%**  
+Buy-pressure change: **{coin['Buy Pressure Δ']:+.1f} pts**  
+30s price change: **{coin['30s Price Δ']:+.2f}%**  
+5m change: **{coin['5m Change %']:+.2f}%**  
 Liquidity: **${coin['Liquidity']:,}**  
-5-minute move: **{coin['5m Change %']}%**  
+Liquidity change: **{coin['Liquidity Δ']:+.1f}%**  
+5m volume: **${coin['5m Volume']:,}**  
 Age: **{coin['Age']}**
 
 Contract:
 
 `{coin['Address']}`
-
-**Fomo:** Search the contract manually before attempting an order.
 """
             )
 
     # ========================================================
-    # WATCHLIST
+    # ACCELERATION RADAR
     # ========================================================
 
     st.subheader(
-        "🟡 Developing Watchlist"
+        "🚀 Momentum Acceleration Radar"
+    )
+
+    if accelerating.empty:
+
+        st.write(
+            "No significant acceleration detected this cycle."
+        )
+
+    else:
+
+        st.dataframe(
+            accelerating[
+                [
+                    "Token",
+                    "Trend",
+                    "Action",
+                    "Score",
+                    "Momentum",
+                    "Momentum Δ",
+                    "Buy %",
+                    "Buy Pressure Δ",
+                    "30s Price Δ",
+                    "Volume Δ",
+                    "Liquidity",
+                    "Risk",
+                    "Address",
+                ]
+            ].head(20),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    # ========================================================
+    # WATCH
+    # ========================================================
+
+    st.subheader(
+        "🟡 Watchlist"
     )
 
     if watch.empty:
 
         st.write(
-            "No developing setups currently qualify."
+            "No developing setups qualify right now."
         )
 
     else:
@@ -1249,207 +1777,201 @@ Contract:
             watch[
                 [
                     "Token",
+                    "Trend",
                     "Score",
                     "Momentum",
+                    "Momentum Δ",
                     "Risk",
                     "Buy %",
-                    "Liquidity",
+                    "30s Price Δ",
                     "5m Change %",
+                    "Liquidity",
                     "Age",
                     "Address",
                 ]
-            ],
+            ].head(20),
             use_container_width=True,
             hide_index=True
         )
 
     # ========================================================
-    # EXIT / WEAKENING
+    # EXIT WARNINGS
     # ========================================================
 
     st.subheader(
-        "🔴 Momentum Breakdown"
+        "🔴 Exit / Deterioration Radar"
     )
 
-    st.caption(
-        "These are deterioration warnings, not guaranteed optimal sell prices."
-    )
-
-    if exits.empty:
+    if danger.empty:
 
         st.write(
-            "No major deterioration signals currently detected."
+            "No major deterioration signals detected this cycle."
         )
 
     else:
 
+        danger = danger.sort_values(
+            "Deterioration",
+            ascending=False
+        )
+
         st.dataframe(
-            exits[
+            danger[
                 [
                     "Token",
                     "Action",
+                    "Trend",
                     "Deterioration",
                     "Momentum",
-                    "Risk",
+                    "Momentum Δ",
                     "Buy %",
-                    "5m Change %",
-                    "Liquidity",
+                    "Buy Pressure Δ",
+                    "30s Price Δ",
+                    "Liquidity Δ",
+                    "Risk",
                     "Address",
                 ]
-            ],
+            ].head(20),
             use_container_width=True,
             hide_index=True
         )
 
     # ========================================================
-    # ALL COINS
+    # EVERYTHING SCANNED THIS ROTATION
     # ========================================================
 
     with st.expander(
-        "🔬 Advanced Data"
+        "🔬 Advanced data — current rotation"
     ):
 
         st.dataframe(
-            tokens[
-                [
-                    "Token",
-                    "Action",
-                    "Score",
-                    "Momentum",
-                    "Risk",
-                    "Liquidity Quality",
-                    "Deterioration",
-                    "Liquidity",
-                    "Market Cap",
-                    "5m Volume",
-                    "5m Buys",
-                    "5m Sells",
-                    "Buy %",
-                    "5m Change %",
-                    "1h Change %",
-                    "Age",
-                    "Address",
-                ]
-            ],
+            tokens,
             use_container_width=True,
             hide_index=True
         )
 
 
+live_dashboard()
+
+
 # ============================================================
-# PERFORMANCE LAB
+# MODEL VALIDATION
 # ============================================================
 
 st.divider()
 
 st.subheader(
-    "🧪 Model Performance"
+    "🧪 Model Validation"
 )
 
-history_rows = []
+history = load_history()
 
-for record in records:
-
-    history_rows.append({
-        "Token":
-            record.get("token"),
-
-        "Initial Signal":
-            record.get(
-                "start_moonshot"
-            ),
-
-        "Initial Status":
-            record.get(
-                "start_status"
-            ),
-
-        "5m %":
-            record.get(
-                "return_5m"
-            ),
-
-        "15m %":
-            record.get(
-                "return_15m"
-            ),
-
-        "30m %":
-            record.get(
-                "return_30m"
-            ),
-
-        "1h %":
-            record.get(
-                "return_1h"
-            ),
-
-        "6h %":
-            record.get(
-                "return_6h"
-            ),
-
-        "24h %":
-            record.get(
-                "return_24h"
-            ),
-    })
-
-
-history_df = pd.DataFrame(
-    history_rows
-)
-
-
-if history_df.empty:
+if not history:
 
     st.info(
-        "The model is collecting its first observations."
+        "No historical signals stored yet."
     )
 
 else:
+
+    rows = []
+
+    for record in history:
+
+        rows.append({
+            "Token":
+                record.get(
+                    "token"
+                ),
+
+            "Signal":
+                record.get(
+                    "start_moonshot"
+                ),
+
+            "Initial Action":
+                record.get(
+                    "start_status"
+                ),
+
+            "5m %":
+                record.get(
+                    "return_5m"
+                ),
+
+            "15m %":
+                record.get(
+                    "return_15m"
+                ),
+
+            "30m %":
+                record.get(
+                    "return_30m"
+                ),
+
+            "1h %":
+                record.get(
+                    "return_1h"
+                ),
+
+            "6h %":
+                record.get(
+                    "return_6h"
+                ),
+
+            "24h %":
+                record.get(
+                    "return_24h"
+                ),
+        })
+
+    history_df = pd.DataFrame(
+        rows
+    )
 
     completed = history_df[
         history_df["5m %"].notna()
     ].copy()
 
-    p1, p2, p3 = st.columns(3)
+    v1, v2, v3 = (
+        st.columns(3)
+    )
 
-    p1.metric(
+    v1.metric(
         "Tokens Tracked",
         len(history_df)
     )
 
-    p2.metric(
+    v2.metric(
         "Completed 5m Tests",
         len(completed)
     )
 
     if not completed.empty:
 
-        values = pd.to_numeric(
+        returns = pd.to_numeric(
             completed["5m %"],
             errors="coerce"
         ).dropna()
 
-        p3.metric(
+        v3.metric(
             "5m Positive Rate",
             (
-                f"{values.gt(0).mean() * 100:.1f}%"
-                if not values.empty
+                f"{returns.gt(0).mean() * 100:.1f}%"
+                if not returns.empty
                 else "—"
             )
         )
 
     else:
 
-        p3.metric(
+        v3.metric(
             "5m Positive Rate",
             "—"
         )
 
     with st.expander(
-        "View historical tests"
+        "Historical performance"
     ):
 
         st.dataframe(
@@ -1460,19 +1982,23 @@ else:
 
 
 # ============================================================
-# IMPORTANT
+# NOTICE
 # ============================================================
 
 st.divider()
 
 st.caption(
     """
-The scanner identifies market setups from available trading data.
-STRONG SETUP does not mean guaranteed profit or that a token is safe.
-The risk model cannot currently detect every malicious contract,
-creator-wallet action, holder concentration, bundled launch, or rug.
-Performance tracking is being used to test whether the model's signals
-actually have predictive value before they should be relied on with
-significant real money.
+LIVE mode automatically updates approximately every 30 seconds while
+the Streamlit session is active. Discovery is cached separately so the
+app can monitor active coins frequently without repeatedly rebuilding
+the entire discovery universe.
+
+The scanner evaluates observable market behavior. It cannot guarantee
+profit, identify every malicious contract, or determine an optimal
+entry/exit with certainty. STRONG SETUP is a research signal, not a
+guaranteed buy instruction. EXIT WARNING means measured conditions
+have deteriorated, not that a particular sale price is guaranteed to
+be optimal.
 """
 )
