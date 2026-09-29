@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 from datetime import datetime, timezone
 
 st.set_page_config(
@@ -11,26 +10,34 @@ st.set_page_config(
 )
 
 st.title("🚀 Solana Moonshot Tracker")
-st.caption("Live Solana scanner • early momentum • risk filtering • exit warnings")
+st.caption(
+    "Live Solana scanner • breakout detection • risk filtering • exit warnings"
+)
 
 PROFILE_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{}"
 
 
-def safe_num(value):
+# ------------------------------------------------
+# HELPERS
+# ------------------------------------------------
+
+def num(value):
     try:
         return float(value or 0)
     except:
         return 0
 
 
-def token_age_minutes(created_at):
-    if not created_at:
+def age_minutes(created):
+
+    if not created:
         return 999999
 
     try:
-        created = datetime.fromtimestamp(
-            created_at / 1000,
+
+        created_time = datetime.fromtimestamp(
+            created / 1000,
             tz=timezone.utc
         )
 
@@ -38,34 +45,43 @@ def token_age_minutes(created_at):
 
         return max(
             0,
-            (now - created).total_seconds() / 60
+            (now - created_time).total_seconds() / 60
         )
+
     except:
         return 999999
 
 
-def age_display(minutes):
+def display_age(minutes):
 
     if minutes < 60:
         return f"{int(minutes)}m"
 
     if minutes < 1440:
-        return f"{minutes / 60:.1f}h"
+        return f"{minutes/60:.1f}h"
 
-    return f"{minutes / 1440:.1f}d"
+    return f"{minutes/1440:.1f}d"
 
+
+# ------------------------------------------------
+# LIVE DATA
+# ------------------------------------------------
 
 @st.cache_data(ttl=20)
-def get_live_tokens():
+def scan():
 
-    profiles = requests.get(
+    response = requests.get(
         PROFILE_URL,
         timeout=15
-    ).json()
+    )
+
+    response.raise_for_status()
+
+    profiles = response.json()
 
     solana = [
-        x for x in profiles
-        if x.get("chainId") == "solana"
+        p for p in profiles
+        if p.get("chainId") == "solana"
     ]
 
     rows = []
@@ -81,6 +97,8 @@ def get_live_tokens():
                 timeout=10
             )
 
+            response.raise_for_status()
+
             pairs = response.json().get("pairs") or []
 
             pairs = [
@@ -91,139 +109,141 @@ def get_live_tokens():
             if not pairs:
                 continue
 
+            # Use highest-liquidity pair
             pair = max(
                 pairs,
-                key=lambda p:
-                safe_num(
+                key=lambda p: num(
                     (p.get("liquidity") or {}).get("usd")
                 )
             )
 
-            liquidity = safe_num(
+            liquidity = num(
                 (pair.get("liquidity") or {}).get("usd")
             )
 
-            market_cap = safe_num(
+            market_cap = num(
                 pair.get("marketCap")
                 or pair.get("fdv")
             )
 
-            volume = pair.get("volume") or {}
+            volumes = pair.get("volume") or {}
 
-            volume_5m = safe_num(volume.get("m5"))
-            volume_1h = safe_num(volume.get("h1"))
-            volume_24h = safe_num(volume.get("h24"))
+            volume5 = num(volumes.get("m5"))
+            volume1h = num(volumes.get("h1"))
 
             changes = pair.get("priceChange") or {}
 
-            change_5m = safe_num(changes.get("m5"))
-            change_1h = safe_num(changes.get("h1"))
+            change5 = num(changes.get("m5"))
+            change1h = num(changes.get("h1"))
 
             txns = pair.get("txns") or {}
 
-            m5 = txns.get("m5") or {}
-            h1 = txns.get("h1") or {}
+            t5 = txns.get("m5") or {}
+            t1 = txns.get("h1") or {}
 
-            buys_5m = safe_num(m5.get("buys"))
-            sells_5m = safe_num(m5.get("sells"))
+            buys5 = num(t5.get("buys"))
+            sells5 = num(t5.get("sells"))
 
-            buys_1h = safe_num(h1.get("buys"))
-            sells_1h = safe_num(h1.get("sells"))
+            buys1 = num(t1.get("buys"))
+            sells1 = num(t1.get("sells"))
 
-            trades_5m = buys_5m + sells_5m
-            trades_1h = buys_1h + sells_1h
+            trades5 = buys5 + sells5
+            trades1 = buys1 + sells1
 
-            buy_ratio_5m = (
-                buys_5m / trades_5m
-                if trades_5m else 0
+            buy_ratio5 = (
+                buys5 / trades5
+                if trades5 else 0
             )
 
-            buy_ratio_1h = (
-                buys_1h / trades_1h
-                if trades_1h else 0
+            buy_ratio1 = (
+                buys1 / trades1
+                if trades1 else 0
             )
 
-            age_min = token_age_minutes(
+            age = age_minutes(
                 pair.get("pairCreatedAt")
             )
 
-            # --------------------------
-            # LIQUIDITY QUALITY
-            # --------------------------
-
-            liq_mcap_ratio = (
+            liq_ratio = (
                 liquidity / market_cap
                 if market_cap > 0
                 else 0
             )
 
-            # --------------------------
-            # MOMENTUM
-            # --------------------------
+            # ========================================
+            # MOMENTUM SCORE
+            # ========================================
 
             momentum = 0
 
-            # Very recent transactions
+            # Recent transaction activity
             momentum += min(
                 20,
-                trades_5m * 0.5
+                trades5 * 0.4
             )
 
-            # 5m buy pressure
-            if buy_ratio_5m >= .70:
+            # Buy pressure
+            if buy_ratio5 >= .72:
                 momentum += 20
 
-            elif buy_ratio_5m >= .60:
+            elif buy_ratio5 >= .62:
                 momentum += 14
 
-            elif buy_ratio_5m >= .52:
+            elif buy_ratio5 >= .54:
                 momentum += 7
 
-            # 1h confirmation
-            if buy_ratio_1h >= .60:
-                momentum += 10
+            # 1-hour confirmation
+            if buy_ratio1 >= .60:
+                momentum += 8
 
             # Recent volume
-            if volume_5m >= 25000:
+            if volume5 >= 25000:
                 momentum += 15
 
-            elif volume_5m >= 10000:
+            elif volume5 >= 10000:
                 momentum += 10
 
-            elif volume_5m >= 3000:
+            elif volume5 >= 3000:
                 momentum += 5
 
-            # Price acceleration
-            if 5 <= change_5m <= 30:
+            # Healthy short-term price acceleration
+            if 3 <= change5 <= 20:
+                momentum += 18
+
+            elif 20 < change5 <= 50:
+                momentum += 13
+
+            elif 50 < change5 <= 100:
+                momentum += 7
+
+            # Launch freshness
+            if age <= 10:
                 momentum += 15
 
-            elif 30 < change_5m <= 80:
+            elif age <= 30:
                 momentum += 10
 
-            elif change_5m > 80:
-                momentum += 4
-
-            # Early-launch bonus
-            if age_min <= 10:
-                momentum += 15
-
-            elif age_min <= 30:
-                momentum += 10
-
-            elif age_min <= 120:
+            elif age <= 120:
                 momentum += 5
 
-            momentum = round(
-                min(100, momentum)
+            # Negative-price penalties
+            if change5 <= -10:
+                momentum -= 15
+
+            if change5 <= -20:
+                momentum -= 15
+
+            momentum = int(
+                max(0, min(100, momentum))
             )
 
-            # --------------------------
+            # ========================================
             # RISK SCORE
-            # --------------------------
+            # ========================================
 
             risk = 45
 
-            # Thin liquidity
+            # Liquidity
             if liquidity < 3000:
                 risk += 35
 
@@ -236,89 +256,122 @@ def get_live_tokens():
             elif liquidity >= 50000:
                 risk -= 10
 
-            # Liquidity relative to market cap
-            if liq_mcap_ratio < .03:
+            # Liquidity vs market cap
+            if liq_ratio < .03:
                 risk += 20
 
-            elif liq_mcap_ratio < .08:
+            elif liq_ratio < .08:
                 risk += 10
 
-            elif liq_mcap_ratio >= .20:
+            elif liq_ratio >= .20:
                 risk -= 10
 
-            # Heavy selling
-            if trades_5m >= 10:
+            # Sell pressure
+            if trades5 >= 10:
 
-                if buy_ratio_5m < .40:
-                    risk += 20
+                if buy_ratio5 < .40:
+                    risk += 25
 
-                elif buy_ratio_5m >= .60:
+                elif buy_ratio5 < .48:
+                    risk += 10
+
+                elif buy_ratio5 >= .62:
                     risk -= 5
 
-            # Extreme short-term pump
-            if change_5m > 100:
+            # Extreme pump
+            if change5 > 100:
                 risk += 15
 
-            # Extremely high volume compared with liquidity
+            # Extreme crash
+            if change5 < -25:
+                risk += 20
+
+            # Suspicious turnover
             if liquidity > 0:
 
-                vol_liq = volume_1h / liquidity
+                turnover = volume1h / liquidity
 
-                if vol_liq > 15:
-                    risk += 10
+                if turnover > 20:
+                    risk += 15
+
+                elif turnover > 10:
+                    risk += 7
 
             risk = int(
                 max(0, min(100, risk))
             )
 
-            # --------------------------
+            # ========================================
             # MOONSHOT SIGNAL
-            # --------------------------
+            # ========================================
 
-            moonshot = (
+            signal = (
                 momentum * .70
                 + (100 - risk) * .30
             ) / 10
 
             # Hard penalties
             if liquidity < 5000:
-                moonshot -= 1.5
+                signal -= 1.5
 
             if risk >= 75:
-                moonshot -= 1.5
+                signal -= 1.5
 
-            moonshot = round(
-                max(1, min(10, moonshot)),
+            if change5 <= -20:
+                signal -= 1
+
+            signal = round(
+                max(1, min(10, signal)),
                 1
             )
 
-            # --------------------------
-            # STATUS
-            # --------------------------
+            # ========================================
+            # ENTRY / EXIT ENGINE
+            # ========================================
 
-            if risk >= 80:
+            # Severe danger first
+            if (
+                risk >= 80
+                or liquidity < 2000
+            ):
 
                 status = "🚨 DANGER"
 
+            # Strong deterioration
             elif (
-                change_5m < -15
-                and sells_5m > buys_5m
+                change5 <= -15
+                and sells5 > buys5
             ):
 
                 status = "🔴 EXIT WARNING"
 
+            # Price collapsing even if buys look active
+            elif change5 <= -25:
+
+                status = "🔴 COOLING FAST"
+
+            # Strong breakout conditions
             elif (
                 momentum >= 80
-                and risk <= 50
+                and risk <= 45
+                and buy_ratio5 >= .60
+                and change5 > 0
             ):
 
-                status = "🔥 ACCELERATING"
+                status = "🔥 BREAKOUT"
 
-            elif momentum >= 65:
+            # Early acceleration
+            elif (
+                momentum >= 65
+                and risk <= 60
+                and buy_ratio5 >= .55
+                and change5 > 0
+            ):
 
-                status = "📈 STRONG"
+                status = "🟢 BUILDING"
 
-            elif momentum >= 45:
+            # Momentum but no confirmation
+            elif momentum >= 55:
 
                 status = "👀 WATCH"
 
@@ -334,10 +387,10 @@ def get_live_tokens():
                     ).get("symbol", "???"),
 
                 "Age":
-                    age_display(age_min),
+                    display_age(age),
 
                 "Moonshot":
-                    moonshot,
+                    signal,
 
                 "Momentum":
                     momentum,
@@ -352,22 +405,25 @@ def get_live_tokens():
                     round(liquidity),
 
                 "5m Volume":
-                    round(volume_5m),
-
-                "1h Volume":
-                    round(volume_1h),
+                    round(volume5),
 
                 "5m Buys":
-                    int(buys_5m),
+                    int(buys5),
 
                 "5m Sells":
-                    int(sells_5m),
+                    int(sells5),
+
+                "Buy %":
+                    round(
+                        buy_ratio5 * 100,
+                        1
+                    ),
 
                 "5m Change %":
-                    round(change_5m, 2),
+                    round(change5, 2),
 
                 "1h Change %":
-                    round(change_1h, 2),
+                    round(change1h, 2),
 
                 "Status":
                     status,
@@ -382,21 +438,21 @@ def get_live_tokens():
     return pd.DataFrame(rows)
 
 
+# ------------------------------------------------
+# DASHBOARD
+# ------------------------------------------------
+
 try:
 
-    tokens = get_live_tokens()
+    tokens = scan()
 
     if tokens.empty:
 
         st.warning(
-            "No live Solana tokens returned."
+            "No Solana tokens currently available."
         )
 
     else:
-
-        # --------------------------
-        # SIDEBAR FILTERS
-        # --------------------------
 
         st.sidebar.header(
             "🎯 Scanner Filters"
@@ -406,42 +462,36 @@ try:
             "Maximum Risk",
             0,
             100,
-            65
+            60
         )
 
-        min_liquidity = st.sidebar.number_input(
+        min_liq = st.sidebar.number_input(
             "Minimum Liquidity ($)",
+            min_value=0,
             value=5000,
             step=1000
         )
 
-        min_moonshot = st.sidebar.slider(
+        min_signal = st.sidebar.slider(
             "Minimum Moonshot Signal",
             1.0,
             10.0,
-            5.0,
+            4.0,
             .1
         )
 
         filtered = tokens[
             (tokens["Risk"] <= max_risk)
             &
-            (tokens["Liquidity"] >= min_liquidity)
+            (tokens["Liquidity"] >= min_liq)
             &
-            (tokens["Moonshot"] >= min_moonshot)
+            (tokens["Moonshot"] >= min_signal)
         ]
 
         filtered = filtered.sort_values(
-            [
-                "Moonshot",
-                "Momentum"
-            ],
+            ["Moonshot", "Momentum"],
             ascending=False
         )
-
-        # --------------------------
-        # TOP METRICS
-        # --------------------------
 
         c1, c2, c3, c4 = st.columns(4)
 
@@ -487,41 +537,85 @@ try:
             hide_index=True
         )
 
-        # --------------------------
-        # HIGH SIGNAL ALERTS
-        # --------------------------
+        # ========================================
+        # BEST CURRENT SETUPS
+        # ========================================
 
-        alerts = filtered[
-            (filtered["Moonshot"] >= 8)
-            &
-            (filtered["Risk"] <= 50)
+        candidates = filtered[
+            filtered["Status"].isin(
+                [
+                    "🔥 BREAKOUT",
+                    "🟢 BUILDING"
+                ]
+            )
         ]
 
-        if len(alerts):
+        if len(candidates):
 
             st.subheader(
-                "🚨 High-Signal Watchlist"
+                "🚀 Current Momentum Setups"
             )
 
-            for _, token in alerts.iterrows():
+            for _, coin in candidates.iterrows():
 
                 st.success(
                     f"""
-🚀 {token['Token']} — {token['Moonshot']}/10
+**{coin['Token']}**
 
-Momentum: {token['Momentum']}/100  
-Risk: {token['Risk']}/100  
-Age: {token['Age']}  
-Liquidity: ${token['Liquidity']:,}  
-5m Buys/Sells: {token['5m Buys']} / {token['5m Sells']}  
-Status: {token['Status']}
+🚀 Signal: **{coin['Moonshot']}/10**  
+📈 Momentum: **{coin['Momentum']}/100**  
+🛡️ Risk: **{coin['Risk']}/100**  
+💧 Liquidity: **${coin['Liquidity']:,}**  
+🟢 5m Buys: **{coin['5m Buys']}**  
+🔴 5m Sells: **{coin['5m Sells']}**  
+⚖️ Buy Ratio: **{coin['Buy %']}%**  
+📊 5m Price: **{coin['5m Change %']}%**
+
+**{coin['Status']}**
 """
                 )
+
+        # ========================================
+        # EXIT WARNINGS
+        # ========================================
+
+        exits = tokens[
+            tokens["Status"].isin(
+                [
+                    "🔴 EXIT WARNING",
+                    "🔴 COOLING FAST",
+                    "🚨 DANGER"
+                ]
+            )
+        ]
+
+        if len(exits):
+
+            st.subheader(
+                "⚠️ Deterioration Monitor"
+            )
+
+            for _, coin in exits.head(5).iterrows():
+
+                st.error(
+                    f"""
+**{coin['Token']}**
+
+Status: **{coin['Status']}**  
+5m Price: **{coin['5m Change %']}%**  
+Buy Ratio: **{coin['Buy %']}%**  
+Risk: **{coin['Risk']}/100**
+"""
+                )
+
+        st.caption(
+            "Scanner data refreshes approximately every 20 seconds."
+        )
 
 except Exception as error:
 
     st.error(
-        "Scanner connection failed."
+        "Scanner failed to load."
     )
 
     st.code(str(error))
@@ -529,17 +623,16 @@ except Exception as error:
 
 st.divider()
 
-st.subheader("⚠️ Important")
+st.subheader("🧪 Development Status")
 
 st.write("""
-The Moonshot number is a **relative signal-strength score**, not the
-probability that a token will increase 50,000% or 100,000%.
+This version distinguishes between **BUILDING, BREAKOUT, WATCH,
+COOLING, EXIT WARNING and DANGER** conditions.
 
-The current Risk score checks market/trading behavior. It still cannot
-detect every rug, bundled wallet, malicious creator, fake holder network,
-or manipulated token.
+The Moonshot score measures relative signal strength. It is **not**
+the probability of a 50,000% or 100,000% return.
 
-The next major improvement is **historical outcome tracking** so we can
-measure whether high scores actually outperform low scores instead of
-assuming the formula works.
+The next major step is historical tracking/backtesting. Until we have
+measured how these signals perform over many launches, they should be
+treated as experimental rather than reliable trading recommendations.
 """)
