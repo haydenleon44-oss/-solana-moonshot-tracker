@@ -15,12 +15,20 @@ st.set_page_config(
 
 st.title("🚀 Solana Moonshot Tracker")
 st.caption(
-    "Live Solana scanner • breakout detection • risk filtering • "
-    "momentum analysis • deterioration warnings"
+    "Live Solana scanner • momentum detection • risk filtering • "
+    "Fomo compatibility screening • performance tracking"
 )
 
 PROFILE_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{}"
+
+
+# ============================================================
+# SESSION HISTORY
+# ============================================================
+
+if "token_history" not in st.session_state:
+    st.session_state.token_history = {}
 
 
 # ============================================================
@@ -63,6 +71,16 @@ def display_age(minutes):
         return f"{minutes / 60:.1f}h"
 
     return f"{minutes / 1440:.1f}d"
+
+
+def percent_change(start_price, current_price):
+    if start_price <= 0:
+        return None
+
+    return (
+        (current_price - start_price)
+        / start_price
+    ) * 100
 
 
 # ============================================================
@@ -116,7 +134,6 @@ def scan():
             if not solana_pairs:
                 continue
 
-            # Choose the pair with the most USD liquidity.
             pair = max(
                 solana_pairs,
                 key=lambda p: num(
@@ -128,12 +145,17 @@ def scan():
 
             symbol = base_token.get("symbol") or "???"
 
+            price_usd = num(
+                pair.get("priceUsd")
+            )
+
             liquidity = num(
                 (pair.get("liquidity") or {}).get("usd")
             )
 
             market_cap = num(
-                pair.get("marketCap") or pair.get("fdv")
+                pair.get("marketCap")
+                or pair.get("fdv")
             )
 
             volumes = pair.get("volume") or {}
@@ -151,11 +173,21 @@ def scan():
             transactions5 = transactions.get("m5") or {}
             transactions1h = transactions.get("h1") or {}
 
-            buys5 = num(transactions5.get("buys"))
-            sells5 = num(transactions5.get("sells"))
+            buys5 = num(
+                transactions5.get("buys")
+            )
 
-            buys1h = num(transactions1h.get("buys"))
-            sells1h = num(transactions1h.get("sells"))
+            sells5 = num(
+                transactions5.get("sells")
+            )
+
+            buys1h = num(
+                transactions1h.get("buys")
+            )
+
+            sells1h = num(
+                transactions1h.get("sells")
+            )
 
             trades5 = buys5 + sells5
             trades1h = buys1h + sells1h
@@ -183,18 +215,16 @@ def scan():
             )
 
             # ====================================================
-            # MOMENTUM SCORE
+            # MOMENTUM
             # ====================================================
 
             momentum = 0
 
-            # Recent trading activity
             momentum += min(
                 20,
                 trades5 * 0.4
             )
 
-            # Five-minute buy pressure
             if buy_ratio5 >= 0.72:
                 momentum += 20
 
@@ -204,11 +234,9 @@ def scan():
             elif buy_ratio5 >= 0.54:
                 momentum += 7
 
-            # One-hour confirmation
             if buy_ratio1h >= 0.60:
                 momentum += 8
 
-            # Five-minute volume
             if volume5 >= 25000:
                 momentum += 15
 
@@ -218,7 +246,6 @@ def scan():
             elif volume5 >= 3000:
                 momentum += 5
 
-            # Short-term price acceleration
             if 3 <= change5 <= 20:
                 momentum += 18
 
@@ -228,7 +255,6 @@ def scan():
             elif 50 < change5 <= 100:
                 momentum += 7
 
-            # Freshness
             if age <= 10:
                 momentum += 15
 
@@ -238,7 +264,6 @@ def scan():
             elif age <= 120:
                 momentum += 5
 
-            # Falling-price penalties
             if change5 <= -10:
                 momentum -= 15
 
@@ -253,12 +278,11 @@ def scan():
             )
 
             # ====================================================
-            # RISK SCORE
+            # RISK
             # ====================================================
 
             risk = 45
 
-            # Liquidity risk
             if liquidity < 3000:
                 risk += 35
 
@@ -271,7 +295,6 @@ def scan():
             elif liquidity >= 50000:
                 risk -= 10
 
-            # Liquidity relative to market cap
             if liquidity_ratio < 0.03:
                 risk += 20
 
@@ -281,7 +304,6 @@ def scan():
             elif liquidity_ratio >= 0.20:
                 risk -= 10
 
-            # Buy/sell pressure
             if trades5 >= 10:
 
                 if buy_ratio5 < 0.40:
@@ -293,18 +315,17 @@ def scan():
                 elif buy_ratio5 >= 0.62:
                     risk -= 5
 
-            # Extreme short-term pump
             if change5 > 100:
                 risk += 15
 
-            # Extreme short-term collapse
             if change5 < -25:
                 risk += 20
 
-            # Volume relative to liquidity
             if liquidity > 0:
 
-                turnover = volume1h / liquidity
+                turnover = (
+                    volume1h / liquidity
+                )
 
                 if turnover > 20:
                     risk += 15
@@ -328,7 +349,6 @@ def scan():
                 + (100 - risk) * 0.30
             ) / 10
 
-            # Hard penalties
             if liquidity < 5000:
                 moonshot -= 1.5
 
@@ -347,28 +367,32 @@ def scan():
             )
 
             # ====================================================
-            # SIGNAL / EXIT ENGINE
+            # STATUS ENGINE
             # ====================================================
 
             if (
                 risk >= 80
                 or liquidity < 2000
             ):
+
                 status = "🚨 DANGER"
 
             elif change5 <= -25:
+
                 status = "🔴 EXIT WARNING"
 
             elif (
                 change5 <= -15
                 and sells5 > buys5
             ):
+
                 status = "🔴 EXIT WARNING"
 
             elif (
                 change5 <= -10
                 and momentum < 60
             ):
+
                 status = "🟡 COOLING"
 
             elif (
@@ -377,6 +401,7 @@ def scan():
                 and buy_ratio5 >= 0.60
                 and change5 > 0
             ):
+
                 status = "🔥 BREAKOUT"
 
             elif (
@@ -385,21 +410,20 @@ def scan():
                 and buy_ratio5 >= 0.55
                 and change5 > 0
             ):
+
                 status = "🟢 BUILDING"
 
             elif momentum >= 55:
+
                 status = "👀 WATCH"
 
             else:
+
                 status = "⚪ WEAK"
 
             # ====================================================
-            # FOMO-COMPATIBILITY SCREEN
+            # FOMO COMPATIBILITY SCREEN
             # ====================================================
-
-            # This does NOT claim Fomo itself has confirmed the token.
-            # It means the token has the basic Solana market conditions
-            # we want before manually searching its contract in Fomo.
 
             if (
                 liquidity >= 5000
@@ -407,14 +431,20 @@ def scan():
                 and sells5 > 0
                 and address
             ):
-                fomo_status = "🔎 Search contract in Fomo"
+
+                fomo_status = (
+                    "🔎 Search contract in Fomo"
+                )
+
             else:
+
                 fomo_status = "❌ Excluded"
 
             rows.append(
                 {
                     "Token": symbol,
                     "Age": display_age(age),
+                    "Price": price_usd,
                     "Moonshot": moonshot,
                     "Momentum": momentum,
                     "Risk": risk,
@@ -452,6 +482,168 @@ def scan():
 
 
 # ============================================================
+# PERFORMANCE TRACKING
+# ============================================================
+
+def update_history(tokens):
+
+    now = datetime.now(timezone.utc)
+
+    checkpoints = {
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "6h": 360,
+        "24h": 1440
+    }
+
+    for _, token in tokens.iterrows():
+
+        address = token["Address"]
+        price = num(token["Price"])
+
+        if not address or price <= 0:
+            continue
+
+        if address not in st.session_state.token_history:
+
+            st.session_state.token_history[address] = {
+                "Token": token["Token"],
+                "Address": address,
+                "Detected": now,
+                "Start Price": price,
+                "Start Moonshot": token["Moonshot"],
+                "Start Momentum": token["Momentum"],
+                "Start Risk": token["Risk"],
+                "Start Status": token["Status"],
+                "5m": None,
+                "15m": None,
+                "30m": None,
+                "1h": None,
+                "6h": None,
+                "24h": None,
+                "Latest": 0.0,
+                "Best": 0.0,
+                "Worst": 0.0
+            }
+
+        record = st.session_state.token_history[
+            address
+        ]
+
+        elapsed = (
+            now - record["Detected"]
+        ).total_seconds() / 60
+
+        performance = percent_change(
+            record["Start Price"],
+            price
+        )
+
+        if performance is None:
+            continue
+
+        record["Latest"] = round(
+            performance,
+            2
+        )
+
+        record["Best"] = round(
+            max(
+                record["Best"],
+                performance
+            ),
+            2
+        )
+
+        record["Worst"] = round(
+            min(
+                record["Worst"],
+                performance
+            ),
+            2
+        )
+
+        for label, minutes in checkpoints.items():
+
+            if (
+                elapsed >= minutes
+                and record[label] is None
+            ):
+
+                record[label] = round(
+                    performance,
+                    2
+                )
+
+
+def history_dataframe():
+
+    rows = []
+
+    for record in st.session_state.token_history.values():
+
+        detected = record["Detected"]
+
+        rows.append(
+            {
+                "Token":
+                    record["Token"],
+
+                "Detected":
+                    detected.strftime(
+                        "%H:%M:%S"
+                    ),
+
+                "Start Signal":
+                    record["Start Moonshot"],
+
+                "Start Momentum":
+                    record["Start Momentum"],
+
+                "Start Risk":
+                    record["Start Risk"],
+
+                "Start Status":
+                    record["Start Status"],
+
+                "Latest %":
+                    record["Latest"],
+
+                "Best %":
+                    record["Best"],
+
+                "Worst %":
+                    record["Worst"],
+
+                "5m %":
+                    record["5m"],
+
+                "15m %":
+                    record["15m"],
+
+                "30m %":
+                    record["30m"],
+
+                "1h %":
+                    record["1h"],
+
+                "6h %":
+                    record["6h"],
+
+                "24h %":
+                    record["24h"],
+
+                "Address":
+                    record["Address"]
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
 # DASHBOARD
 # ============================================================
 
@@ -462,10 +654,13 @@ try:
     if tokens.empty:
 
         st.warning(
-            "No Solana tokens are currently available from the scanner."
+            "No Solana tokens are currently available."
         )
 
     else:
+
+        # Track everything returned by scanner.
+        update_history(tokens)
 
         # --------------------------------------------------------
         # SIDEBAR
@@ -477,9 +672,9 @@ try:
 
         max_risk = st.sidebar.slider(
             "Maximum Risk",
-            min_value=0,
-            max_value=100,
-            value=60
+            0,
+            100,
+            60
         )
 
         min_liquidity = st.sidebar.number_input(
@@ -491,21 +686,22 @@ try:
 
         min_signal = st.sidebar.slider(
             "Minimum Moonshot Signal",
-            min_value=1.0,
-            max_value=10.0,
-            value=4.0,
-            step=0.1
+            1.0,
+            10.0,
+            4.0,
+            0.1
         )
 
         if st.sidebar.button(
             "🔄 Refresh Data",
             use_container_width=True
         ):
+
             st.cache_data.clear()
             st.rerun()
 
         # --------------------------------------------------------
-        # MAIN FILTER
+        # FILTERED FEED
         # --------------------------------------------------------
 
         filtered = tokens[
@@ -528,7 +724,7 @@ try:
         )
 
         # --------------------------------------------------------
-        # TOP METRICS
+        # METRICS
         # --------------------------------------------------------
 
         col1, col2, col3, col4 = st.columns(4)
@@ -576,8 +772,7 @@ try:
         if filtered.empty:
 
             st.info(
-                "Nothing currently passes all of your filters. "
-                "The scanner will not force a recommendation."
+                "Nothing currently passes all filters."
             )
 
         else:
@@ -608,7 +803,7 @@ try:
             )
 
         # --------------------------------------------------------
-        # BREAKOUT / BUILDING CANDIDATES
+        # CURRENT SETUPS
         # --------------------------------------------------------
 
         candidates = filtered[
@@ -634,24 +829,26 @@ try:
 
 Status: **{coin['Status']}**
 
-🚀 Moonshot Signal: **{coin['Moonshot']}/10**  
+🚀 Signal: **{coin['Moonshot']}/10**  
 📈 Momentum: **{coin['Momentum']}/100**  
 🛡️ Risk: **{coin['Risk']}/100**  
 💧 Liquidity: **${coin['Liquidity']:,}**  
 📊 5m Volume: **${coin['5m Volume']:,}**  
-🟢 5m Buys: **{coin['5m Buys']}**  
-🔴 5m Sells: **{coin['5m Sells']}**  
+🟢 Buys: **{coin['5m Buys']}**  
+🔴 Sells: **{coin['5m Sells']}**  
 ⚖️ Buy Ratio: **{coin['Buy %']}%**  
 📈 5m Price: **{coin['5m Change %']}%**
 
-**Fomo check:** {coin['Fomo']}
+Fomo: **{coin['Fomo']}**
 
-**Contract:** `{coin['Address']}`
+Contract:
+
+`{coin['Address']}`
 """
                 )
 
         # --------------------------------------------------------
-        # DETERIORATION MONITOR
+        # DETERIORATION
         # --------------------------------------------------------
 
         danger_tokens = tokens[
@@ -689,9 +886,75 @@ Risk: **{coin['Risk']}/100**
 """
                 )
 
-        st.caption(
-            "Data is cached for 20 seconds. Use Refresh Data to request a new scan."
+        # --------------------------------------------------------
+        # PERFORMANCE LAB
+        # --------------------------------------------------------
+
+        st.divider()
+
+        st.subheader(
+            "🧪 Signal Performance Lab"
         )
+
+        st.caption(
+            "Tracks what happens after this session first detects a token."
+        )
+
+        history = history_dataframe()
+
+        if not history.empty:
+
+            st.metric(
+                "Tokens Being Tracked",
+                len(history)
+            )
+
+            history = history.sort_values(
+                "Start Signal",
+                ascending=False
+            )
+
+            st.dataframe(
+                history,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            completed5 = history[
+                history["5m %"].notna()
+            ]
+
+            if not completed5.empty:
+
+                st.subheader(
+                    "📊 Early Results"
+                )
+
+                result1, result2, result3 = st.columns(3)
+
+                result1.metric(
+                    "5m Samples",
+                    len(completed5)
+                )
+
+                result2.metric(
+                    "Average 5m Return",
+                    f"{completed5['5m %'].mean():.2f}%"
+                )
+
+                winners = (
+                    completed5["5m %"] > 0
+                ).mean() * 100
+
+                result3.metric(
+                    "5m Positive Rate",
+                    f"{winners:.1f}%"
+                )
+
+        st.caption(
+            "Click Refresh Data to collect another live snapshot."
+        )
+
 
 except requests.RequestException as error:
 
@@ -700,6 +963,7 @@ except requests.RequestException as error:
     )
 
     st.code(str(error))
+
 
 except Exception as error:
 
@@ -717,26 +981,25 @@ except Exception as error:
 st.divider()
 
 st.subheader(
-    "🧪 Development Status"
+    "🔬 Tracker Status"
 )
 
 st.write(
     """
-The scanner analyzes live Solana market activity and separates
-BUILDING, BREAKOUT, WATCH, COOLING, EXIT WARNING and DANGER conditions.
+The app is now collecting experimental outcome data.
 
-**Fomo:** A token shown in the Opportunity Feed has an active Solana
-market, sufficient configured liquidity, recent buys and recent sells.
-The contract address is provided so it can be searched in Fomo.
+When a token is first observed, its price, Moonshot score,
+Momentum score, Risk score and status are recorded. Later scans
+measure its return relative to that detection price.
 
-This does **not** mean Fomo has independently confirmed that the token
-is executable at that exact moment.
+The 5-minute, 15-minute, 30-minute, 1-hour, 6-hour and 24-hour
+columns fill in as those checkpoints are reached.
 
-The Moonshot score is a relative experimental signal score — not the
-probability of a 50,000% or 100,000% return.
+**Important:** this version stores history only in the current
+Streamlit session. A server restart or session reset can erase it.
+Persistent storage is the next infrastructure upgrade.
 
-The scoring system has not yet been validated through sufficient
-historical testing. The next major upgrade is outcome tracking so the
-app can measure what happens after a token is detected.
+The Moonshot score is still experimental and should not be interpreted
+as a probability or guarantee of future returns.
 """
 )
