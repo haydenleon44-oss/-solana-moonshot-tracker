@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timezone
+from supabase import create_client
 
 # ============================================================
 # PAGE SETUP
@@ -16,7 +17,7 @@ st.set_page_config(
 st.title("🚀 Solana Moonshot Tracker")
 st.caption(
     "Live Solana scanner • momentum detection • risk filtering • "
-    "Fomo compatibility screening • performance tracking"
+    "Fomo screening • persistent performance tracking"
 )
 
 PROFILE_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
@@ -24,11 +25,17 @@ TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{}"
 
 
 # ============================================================
-# SESSION HISTORY
+# SUPABASE
 # ============================================================
 
-if "token_history" not in st.session_state:
-    st.session_state.token_history = {}
+@st.cache_resource
+def get_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_SECRET_KEY"]
+    return create_client(url, key)
+
+
+supabase = get_supabase()
 
 
 # ============================================================
@@ -83,6 +90,18 @@ def percent_change(start_price, current_price):
     ) * 100
 
 
+def parse_supabase_time(value):
+    if not value:
+        return datetime.now(timezone.utc)
+
+    try:
+        return datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
 # ============================================================
 # LIVE SCANNER
 # ============================================================
@@ -94,7 +113,6 @@ def scan():
         PROFILE_URL,
         timeout=15
     )
-
     response.raise_for_status()
 
     profiles = response.json()
@@ -120,7 +138,6 @@ def scan():
                 TOKEN_URL.format(address),
                 timeout=10
             )
-
             response.raise_for_status()
 
             pairs = response.json().get("pairs") or []
@@ -142,12 +159,9 @@ def scan():
             )
 
             base_token = pair.get("baseToken") or {}
-
             symbol = base_token.get("symbol") or "???"
 
-            price_usd = num(
-                pair.get("priceUsd")
-            )
+            price_usd = num(pair.get("priceUsd"))
 
             liquidity = num(
                 (pair.get("liquidity") or {}).get("usd")
@@ -159,12 +173,10 @@ def scan():
             )
 
             volumes = pair.get("volume") or {}
-
             volume5 = num(volumes.get("m5"))
             volume1h = num(volumes.get("h1"))
 
             changes = pair.get("priceChange") or {}
-
             change5 = num(changes.get("m5"))
             change1h = num(changes.get("h1"))
 
@@ -173,21 +185,11 @@ def scan():
             transactions5 = transactions.get("m5") or {}
             transactions1h = transactions.get("h1") or {}
 
-            buys5 = num(
-                transactions5.get("buys")
-            )
+            buys5 = num(transactions5.get("buys"))
+            sells5 = num(transactions5.get("sells"))
 
-            sells5 = num(
-                transactions5.get("sells")
-            )
-
-            buys1h = num(
-                transactions1h.get("buys")
-            )
-
-            sells1h = num(
-                transactions1h.get("sells")
-            )
+            buys1h = num(transactions1h.get("buys"))
+            sells1h = num(transactions1h.get("sells"))
 
             trades5 = buys5 + sells5
             trades1h = buys1h + sells1h
@@ -215,7 +217,7 @@ def scan():
             )
 
             # ====================================================
-            # MOMENTUM
+            # MOMENTUM SCORE
             # ====================================================
 
             momentum = 0
@@ -271,14 +273,11 @@ def scan():
                 momentum -= 15
 
             momentum = int(
-                max(
-                    0,
-                    min(100, momentum)
-                )
+                max(0, min(100, momentum))
             )
 
             # ====================================================
-            # RISK
+            # RISK SCORE
             # ====================================================
 
             risk = 45
@@ -323,9 +322,7 @@ def scan():
 
             if liquidity > 0:
 
-                turnover = (
-                    volume1h / liquidity
-                )
+                turnover = volume1h / liquidity
 
                 if turnover > 20:
                     risk += 15
@@ -334,10 +331,7 @@ def scan():
                     risk += 7
 
             risk = int(
-                max(
-                    0,
-                    min(100, risk)
-                )
+                max(0, min(100, risk))
             )
 
             # ====================================================
@@ -359,10 +353,7 @@ def scan():
                 moonshot -= 1.0
 
             moonshot = round(
-                max(
-                    1,
-                    min(10, moonshot)
-                ),
+                max(1, min(10, moonshot)),
                 1
             )
 
@@ -374,25 +365,21 @@ def scan():
                 risk >= 80
                 or liquidity < 2000
             ):
-
                 status = "🚨 DANGER"
 
             elif change5 <= -25:
-
                 status = "🔴 EXIT WARNING"
 
             elif (
                 change5 <= -15
                 and sells5 > buys5
             ):
-
                 status = "🔴 EXIT WARNING"
 
             elif (
                 change5 <= -10
                 and momentum < 60
             ):
-
                 status = "🟡 COOLING"
 
             elif (
@@ -401,7 +388,6 @@ def scan():
                 and buy_ratio5 >= 0.60
                 and change5 > 0
             ):
-
                 status = "🔥 BREAKOUT"
 
             elif (
@@ -410,19 +396,16 @@ def scan():
                 and buy_ratio5 >= 0.55
                 and change5 > 0
             ):
-
                 status = "🟢 BUILDING"
 
             elif momentum >= 55:
-
                 status = "👀 WATCH"
 
             else:
-
                 status = "⚪ WEAK"
 
             # ====================================================
-            # FOMO COMPATIBILITY SCREEN
+            # FOMO-COMPATIBILITY SCREEN
             # ====================================================
 
             if (
@@ -431,13 +414,11 @@ def scan():
                 and sells5 > 0
                 and address
             ):
-
                 fomo_status = (
                     "🔎 Search contract in Fomo"
                 )
 
             else:
-
                 fomo_status = "❌ Excluded"
 
             rows.append(
@@ -482,20 +463,20 @@ def scan():
 
 
 # ============================================================
-# PERFORMANCE TRACKING
+# SUPABASE PERFORMANCE TRACKER
 # ============================================================
 
-def update_history(tokens):
+def update_persistent_history(tokens):
 
     now = datetime.now(timezone.utc)
 
     checkpoints = {
-        "5m": 5,
-        "15m": 15,
-        "30m": 30,
-        "1h": 60,
-        "6h": 360,
-        "24h": 1440
+        "return_5m": 5,
+        "return_15m": 15,
+        "return_30m": 30,
+        "return_1h": 60,
+        "return_6h": 360,
+        "return_24h": 1440
     }
 
     for _, token in tokens.iterrows():
@@ -506,141 +487,256 @@ def update_history(tokens):
         if not address or price <= 0:
             continue
 
-        if address not in st.session_state.token_history:
+        try:
 
-            st.session_state.token_history[address] = {
-                "Token": token["Token"],
-                "Address": address,
-                "Detected": now,
-                "Start Price": price,
-                "Start Moonshot": token["Moonshot"],
-                "Start Momentum": token["Momentum"],
-                "Start Risk": token["Risk"],
-                "Start Status": token["Status"],
-                "5m": None,
-                "15m": None,
-                "30m": None,
-                "1h": None,
-                "6h": None,
-                "24h": None,
-                "Latest": 0.0,
-                "Best": 0.0,
-                "Worst": 0.0
-            }
+            result = (
+                supabase
+                .table("token_history")
+                .select("*")
+                .eq("address", address)
+                .limit(1)
+                .execute()
+            )
 
-        record = st.session_state.token_history[
-            address
-        ]
+            existing = result.data or []
 
-        elapsed = (
-            now - record["Detected"]
-        ).total_seconds() / 60
+            # --------------------------------------------
+            # FIRST DETECTION
+            # --------------------------------------------
 
-        performance = percent_change(
-            record["Start Price"],
-            price
-        )
+            if not existing:
 
-        if performance is None:
-            continue
+                new_record = {
+                    "address": address,
+                    "token": token["Token"],
+                    "detected_at": now.isoformat(),
+                    "start_price": price,
+                    "start_moonshot": float(
+                        token["Moonshot"]
+                    ),
+                    "start_momentum": int(
+                        token["Momentum"]
+                    ),
+                    "start_risk": int(
+                        token["Risk"]
+                    ),
+                    "start_status": token["Status"],
+                    "latest_return": 0.0,
+                    "best_return": 0.0,
+                    "worst_return": 0.0,
+                    "last_price": price,
+                    "last_updated": now.isoformat()
+                }
 
-        record["Latest"] = round(
-            performance,
-            2
-        )
-
-        record["Best"] = round(
-            max(
-                record["Best"],
-                performance
-            ),
-            2
-        )
-
-        record["Worst"] = round(
-            min(
-                record["Worst"],
-                performance
-            ),
-            2
-        )
-
-        for label, minutes in checkpoints.items():
-
-            if (
-                elapsed >= minutes
-                and record[label] is None
-            ):
-
-                record[label] = round(
-                    performance,
-                    2
+                (
+                    supabase
+                    .table("token_history")
+                    .insert(new_record)
+                    .execute()
                 )
 
+                continue
 
-def history_dataframe():
+            # --------------------------------------------
+            # EXISTING TOKEN
+            # --------------------------------------------
 
-    rows = []
+            record = existing[0]
 
-    for record in st.session_state.token_history.values():
+            start_price = num(
+                record.get("start_price")
+            )
 
-        detected = record["Detected"]
+            if start_price <= 0:
+                continue
 
-        rows.append(
-            {
-                "Token":
-                    record["Token"],
+            detected_at = parse_supabase_time(
+                record.get("detected_at")
+            )
 
-                "Detected":
-                    detected.strftime(
-                        "%H:%M:%S"
-                    ),
+            elapsed = (
+                now - detected_at
+            ).total_seconds() / 60
 
-                "Start Signal":
-                    record["Start Moonshot"],
+            performance = percent_change(
+                start_price,
+                price
+            )
 
-                "Start Momentum":
-                    record["Start Momentum"],
+            if performance is None:
+                continue
 
-                "Start Risk":
-                    record["Start Risk"],
+            performance = round(
+                performance,
+                2
+            )
 
-                "Start Status":
-                    record["Start Status"],
+            old_best = num(
+                record.get("best_return")
+            )
 
-                "Latest %":
-                    record["Latest"],
+            old_worst = num(
+                record.get("worst_return")
+            )
 
-                "Best %":
-                    record["Best"],
-
-                "Worst %":
-                    record["Worst"],
-
-                "5m %":
-                    record["5m"],
-
-                "15m %":
-                    record["15m"],
-
-                "30m %":
-                    record["30m"],
-
-                "1h %":
-                    record["1h"],
-
-                "6h %":
-                    record["6h"],
-
-                "24h %":
-                    record["24h"],
-
-                "Address":
-                    record["Address"]
+            updates = {
+                "latest_return": performance,
+                "best_return": max(
+                    old_best,
+                    performance
+                ),
+                "worst_return": min(
+                    old_worst,
+                    performance
+                ),
+                "last_price": price,
+                "last_updated": now.isoformat()
             }
+
+            # --------------------------------------------
+            # CHECKPOINTS
+            # --------------------------------------------
+
+            for column, minutes in checkpoints.items():
+
+                if (
+                    elapsed >= minutes
+                    and record.get(column) is None
+                ):
+                    updates[column] = performance
+
+            (
+                supabase
+                .table("token_history")
+                .update(updates)
+                .eq("address", address)
+                .execute()
+            )
+
+        except Exception:
+            # One database error should not stop scanner.
+            continue
+
+
+# ============================================================
+# LOAD DATABASE HISTORY
+# ============================================================
+
+def load_history():
+
+    try:
+
+        result = (
+            supabase
+            .table("token_history")
+            .select("*")
+            .order(
+                "detected_at",
+                desc=True
+            )
+            .limit(500)
+            .execute()
         )
 
-    return pd.DataFrame(rows)
+        rows = result.data or []
+
+        if not rows:
+            return pd.DataFrame()
+
+        display_rows = []
+
+        for record in rows:
+
+            detected = parse_supabase_time(
+                record.get("detected_at")
+            )
+
+            display_rows.append(
+                {
+                    "Token":
+                        record.get("token"),
+
+                    "Detected":
+                        detected.strftime(
+                            "%m/%d %H:%M"
+                        ),
+
+                    "Start Signal":
+                        record.get(
+                            "start_moonshot"
+                        ),
+
+                    "Start Momentum":
+                        record.get(
+                            "start_momentum"
+                        ),
+
+                    "Start Risk":
+                        record.get(
+                            "start_risk"
+                        ),
+
+                    "Start Status":
+                        record.get(
+                            "start_status"
+                        ),
+
+                    "Latest %":
+                        record.get(
+                            "latest_return"
+                        ),
+
+                    "Best %":
+                        record.get(
+                            "best_return"
+                        ),
+
+                    "Worst %":
+                        record.get(
+                            "worst_return"
+                        ),
+
+                    "5m %":
+                        record.get(
+                            "return_5m"
+                        ),
+
+                    "15m %":
+                        record.get(
+                            "return_15m"
+                        ),
+
+                    "30m %":
+                        record.get(
+                            "return_30m"
+                        ),
+
+                    "1h %":
+                        record.get(
+                            "return_1h"
+                        ),
+
+                    "6h %":
+                        record.get(
+                            "return_6h"
+                        ),
+
+                    "24h %":
+                        record.get(
+                            "return_24h"
+                        ),
+
+                    "Address":
+                        record.get("address")
+                }
+            )
+
+        return pd.DataFrame(
+            display_rows
+        )
+
+    except Exception:
+        return pd.DataFrame()
 
 
 # ============================================================
@@ -659,8 +755,8 @@ try:
 
     else:
 
-        # Track everything returned by scanner.
-        update_history(tokens)
+        # Save/update current observations in Supabase.
+        update_persistent_history(tokens)
 
         # --------------------------------------------------------
         # SIDEBAR
@@ -701,7 +797,7 @@ try:
             st.rerun()
 
         # --------------------------------------------------------
-        # FILTERED FEED
+        # MAIN FILTER
         # --------------------------------------------------------
 
         filtered = tokens[
@@ -762,7 +858,7 @@ try:
         )
 
         # --------------------------------------------------------
-        # OPPORTUNITY FEED
+        # LIVE OPPORTUNITY FEED
         # --------------------------------------------------------
 
         st.subheader(
@@ -803,7 +899,7 @@ try:
             )
 
         # --------------------------------------------------------
-        # CURRENT SETUPS
+        # CURRENT MOMENTUM SETUPS
         # --------------------------------------------------------
 
         candidates = filtered[
@@ -834,12 +930,12 @@ Status: **{coin['Status']}**
 🛡️ Risk: **{coin['Risk']}/100**  
 💧 Liquidity: **${coin['Liquidity']:,}**  
 📊 5m Volume: **${coin['5m Volume']:,}**  
-🟢 Buys: **{coin['5m Buys']}**  
-🔴 Sells: **{coin['5m Sells']}**  
+🟢 5m Buys: **{coin['5m Buys']}**  
+🔴 5m Sells: **{coin['5m Sells']}**  
 ⚖️ Buy Ratio: **{coin['Buy %']}%**  
 📈 5m Price: **{coin['5m Change %']}%**
 
-Fomo: **{coin['Fomo']}**
+Fomo check: **{coin['Fomo']}**
 
 Contract:
 
@@ -848,7 +944,7 @@ Contract:
                 )
 
         # --------------------------------------------------------
-        # DETERIORATION
+        # DETERIORATION MONITOR
         # --------------------------------------------------------
 
         danger_tokens = tokens[
@@ -887,31 +983,45 @@ Risk: **{coin['Risk']}/100**
                 )
 
         # --------------------------------------------------------
-        # PERFORMANCE LAB
+        # PERSISTENT PERFORMANCE LAB
         # --------------------------------------------------------
 
         st.divider()
 
         st.subheader(
-            "🧪 Signal Performance Lab"
+            "🧪 Persistent Signal Performance Lab"
         )
 
         st.caption(
-            "Tracks what happens after this session first detects a token."
+            "Historical results are stored in Supabase and "
+            "can survive Streamlit restarts."
         )
 
-        history = history_dataframe()
+        history = load_history()
 
-        if not history.empty:
+        if history.empty:
 
-            st.metric(
-                "Tokens Being Tracked",
+            st.info(
+                "No persistent tracking records yet. "
+                "Refresh the scanner to begin collecting observations."
+            )
+
+        else:
+
+            metric1, metric2 = st.columns(2)
+
+            metric1.metric(
+                "Tokens Recorded",
                 len(history)
             )
 
-            history = history.sort_values(
-                "Start Signal",
-                ascending=False
+            completed_5m = history[
+                history["5m %"].notna()
+            ]
+
+            metric2.metric(
+                "Completed 5m Samples",
+                len(completed_5m)
             )
 
             st.dataframe(
@@ -920,39 +1030,46 @@ Risk: **{coin['Risk']}/100**
                 hide_index=True
             )
 
-            completed5 = history[
-                history["5m %"].notna()
-            ]
-
-            if not completed5.empty:
+            if not completed_5m.empty:
 
                 st.subheader(
-                    "📊 Early Results"
+                    "📊 Early Backtest Results"
                 )
 
-                result1, result2, result3 = st.columns(3)
+                r1, r2, r3 = st.columns(3)
 
-                result1.metric(
+                average_5m = (
+                    completed_5m["5m %"]
+                    .astype(float)
+                    .mean()
+                )
+
+                positive_rate = (
+                    (
+                        completed_5m["5m %"]
+                        .astype(float)
+                        > 0
+                    ).mean()
+                    * 100
+                )
+
+                r1.metric(
                     "5m Samples",
-                    len(completed5)
+                    len(completed_5m)
                 )
 
-                result2.metric(
+                r2.metric(
                     "Average 5m Return",
-                    f"{completed5['5m %'].mean():.2f}%"
+                    f"{average_5m:.2f}%"
                 )
 
-                winners = (
-                    completed5["5m %"] > 0
-                ).mean() * 100
-
-                result3.metric(
+                r3.metric(
                     "5m Positive Rate",
-                    f"{winners:.1f}%"
+                    f"{positive_rate:.1f}%"
                 )
 
         st.caption(
-            "Click Refresh Data to collect another live snapshot."
+            "Use Refresh Data to collect another live observation."
         )
 
 
@@ -975,7 +1092,7 @@ except Exception as error:
 
 
 # ============================================================
-# DEVELOPMENT NOTICE
+# STATUS NOTICE
 # ============================================================
 
 st.divider()
@@ -986,20 +1103,26 @@ st.subheader(
 
 st.write(
     """
-The app is now collecting experimental outcome data.
+The tracker now uses Supabase for persistent outcome storage.
 
-When a token is first observed, its price, Moonshot score,
-Momentum score, Risk score and status are recorded. Later scans
-measure its return relative to that detection price.
+For each observed token it stores the initial price, Moonshot signal,
+Momentum score, Risk score and status. Future observations are compared
+with that initial price.
 
-The 5-minute, 15-minute, 30-minute, 1-hour, 6-hour and 24-hour
-columns fill in as those checkpoints are reached.
+The tracker records checkpoints at approximately:
 
-**Important:** this version stores history only in the current
-Streamlit session. A server restart or session reset can erase it.
-Persistent storage is the next infrastructure upgrade.
+**5m → 15m → 30m → 1h → 6h → 24h**
 
-The Moonshot score is still experimental and should not be interpreted
-as a probability or guarantee of future returns.
+A checkpoint is recorded when the scanner sees that token again after
+the required amount of time has passed. Because the current discovery
+feed does not guarantee that every token remains visible, some
+checkpoints may remain empty.
+
+The Fomo label currently means the token passes our Solana market
+compatibility screen and its contract can be searched in Fomo. It is
+not direct confirmation from Fomo that an order can execute.
+
+The Moonshot score remains experimental. Historical results are being
+collected so the scoring model can later be evaluated and recalibrated.
 """
 )
