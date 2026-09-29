@@ -3,6 +3,10 @@ import pandas as pd
 import requests
 from datetime import datetime, timezone
 
+# ============================================================
+# PAGE SETUP
+# ============================================================
+
 st.set_page_config(
     page_title="Solana Moonshot Tracker",
     page_icon="🚀",
@@ -11,31 +15,30 @@ st.set_page_config(
 
 st.title("🚀 Solana Moonshot Tracker")
 st.caption(
-    "Live Solana scanner • breakout detection • risk filtering • exit warnings"
+    "Live Solana scanner • breakout detection • risk filtering • "
+    "momentum analysis • deterioration warnings"
 )
 
 PROFILE_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{}"
 
 
-# ------------------------------------------------
+# ============================================================
 # HELPERS
-# ------------------------------------------------
+# ============================================================
 
 def num(value):
     try:
         return float(value or 0)
-    except:
-        return 0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def age_minutes(created):
-
     if not created:
         return 999999
 
     try:
-
         created_time = datetime.fromtimestamp(
             created / 1000,
             tz=timezone.utc
@@ -48,24 +51,23 @@ def age_minutes(created):
             (now - created_time).total_seconds() / 60
         )
 
-    except:
+    except (TypeError, ValueError, OSError):
         return 999999
 
 
 def display_age(minutes):
-
     if minutes < 60:
         return f"{int(minutes)}m"
 
     if minutes < 1440:
-        return f"{minutes/60:.1f}h"
+        return f"{minutes / 60:.1f}h"
 
-    return f"{minutes/1440:.1f}d"
+    return f"{minutes / 1440:.1f}d"
 
 
-# ------------------------------------------------
-# LIVE DATA
-# ------------------------------------------------
+# ============================================================
+# LIVE SCANNER
+# ============================================================
 
 @st.cache_data(ttl=20)
 def scan():
@@ -79,16 +81,20 @@ def scan():
 
     profiles = response.json()
 
-    solana = [
-        p for p in profiles
-        if p.get("chainId") == "solana"
+    solana_profiles = [
+        profile
+        for profile in profiles
+        if profile.get("chainId") == "solana"
     ]
 
     rows = []
 
-    for profile in solana[:30]:
+    for profile in solana_profiles[:30]:
 
         address = profile.get("tokenAddress")
+
+        if not address:
+            continue
 
         try:
 
@@ -101,29 +107,33 @@ def scan():
 
             pairs = response.json().get("pairs") or []
 
-            pairs = [
-                p for p in pairs
-                if p.get("chainId") == "solana"
+            solana_pairs = [
+                pair
+                for pair in pairs
+                if pair.get("chainId") == "solana"
             ]
 
-            if not pairs:
+            if not solana_pairs:
                 continue
 
-            # Use highest-liquidity pair
+            # Choose the pair with the most USD liquidity.
             pair = max(
-                pairs,
+                solana_pairs,
                 key=lambda p: num(
                     (p.get("liquidity") or {}).get("usd")
                 )
             )
+
+            base_token = pair.get("baseToken") or {}
+
+            symbol = base_token.get("symbol") or "???"
 
             liquidity = num(
                 (pair.get("liquidity") or {}).get("usd")
             )
 
             market_cap = num(
-                pair.get("marketCap")
-                or pair.get("fdv")
+                pair.get("marketCap") or pair.get("fdv")
             )
 
             volumes = pair.get("volume") or {}
@@ -136,67 +146,69 @@ def scan():
             change5 = num(changes.get("m5"))
             change1h = num(changes.get("h1"))
 
-            txns = pair.get("txns") or {}
+            transactions = pair.get("txns") or {}
 
-            t5 = txns.get("m5") or {}
-            t1 = txns.get("h1") or {}
+            transactions5 = transactions.get("m5") or {}
+            transactions1h = transactions.get("h1") or {}
 
-            buys5 = num(t5.get("buys"))
-            sells5 = num(t5.get("sells"))
+            buys5 = num(transactions5.get("buys"))
+            sells5 = num(transactions5.get("sells"))
 
-            buys1 = num(t1.get("buys"))
-            sells1 = num(t1.get("sells"))
+            buys1h = num(transactions1h.get("buys"))
+            sells1h = num(transactions1h.get("sells"))
 
             trades5 = buys5 + sells5
-            trades1 = buys1 + sells1
+            trades1h = buys1h + sells1h
 
             buy_ratio5 = (
                 buys5 / trades5
-                if trades5 else 0
+                if trades5 > 0
+                else 0
             )
 
-            buy_ratio1 = (
-                buys1 / trades1
-                if trades1 else 0
+            buy_ratio1h = (
+                buys1h / trades1h
+                if trades1h > 0
+                else 0
             )
 
             age = age_minutes(
                 pair.get("pairCreatedAt")
             )
 
-            liq_ratio = (
+            liquidity_ratio = (
                 liquidity / market_cap
                 if market_cap > 0
                 else 0
             )
 
-            # ========================================
+            # ====================================================
             # MOMENTUM SCORE
-            # ========================================
+            # ====================================================
 
             momentum = 0
 
-            # Recent transaction activity
+            # Recent trading activity
             momentum += min(
                 20,
                 trades5 * 0.4
             )
 
-            # Buy pressure
-            if buy_ratio5 >= .72:
+            # Five-minute buy pressure
+            if buy_ratio5 >= 0.72:
                 momentum += 20
 
-            elif buy_ratio5 >= .62:
+            elif buy_ratio5 >= 0.62:
                 momentum += 14
 
-            elif buy_ratio5 >= .54:
+            elif buy_ratio5 >= 0.54:
                 momentum += 7
 
-            # 1-hour confirmation
-            if buy_ratio1 >= .60:
+            # One-hour confirmation
+            if buy_ratio1h >= 0.60:
                 momentum += 8
 
-            # Recent volume
+            # Five-minute volume
             if volume5 >= 25000:
                 momentum += 15
 
@@ -206,7 +218,7 @@ def scan():
             elif volume5 >= 3000:
                 momentum += 5
 
-            # Healthy short-term price acceleration
+            # Short-term price acceleration
             if 3 <= change5 <= 20:
                 momentum += 18
 
@@ -216,7 +228,7 @@ def scan():
             elif 50 < change5 <= 100:
                 momentum += 7
 
-            # Launch freshness
+            # Freshness
             if age <= 10:
                 momentum += 15
 
@@ -226,7 +238,7 @@ def scan():
             elif age <= 120:
                 momentum += 5
 
-            # Negative-price penalties
+            # Falling-price penalties
             if change5 <= -10:
                 momentum -= 15
 
@@ -234,16 +246,19 @@ def scan():
                 momentum -= 15
 
             momentum = int(
-                max(0, min(100, momentum))
+                max(
+                    0,
+                    min(100, momentum)
+                )
             )
 
-            # ========================================
+            # ====================================================
             # RISK SCORE
-            # ========================================
+            # ====================================================
 
             risk = 45
 
-            # Liquidity
+            # Liquidity risk
             if liquidity < 3000:
                 risk += 35
 
@@ -256,37 +271,37 @@ def scan():
             elif liquidity >= 50000:
                 risk -= 10
 
-            # Liquidity vs market cap
-            if liq_ratio < .03:
+            # Liquidity relative to market cap
+            if liquidity_ratio < 0.03:
                 risk += 20
 
-            elif liq_ratio < .08:
+            elif liquidity_ratio < 0.08:
                 risk += 10
 
-            elif liq_ratio >= .20:
+            elif liquidity_ratio >= 0.20:
                 risk -= 10
 
-            # Sell pressure
+            # Buy/sell pressure
             if trades5 >= 10:
 
-                if buy_ratio5 < .40:
+                if buy_ratio5 < 0.40:
                     risk += 25
 
-                elif buy_ratio5 < .48:
+                elif buy_ratio5 < 0.48:
                     risk += 10
 
-                elif buy_ratio5 >= .62:
+                elif buy_ratio5 >= 0.62:
                     risk -= 5
 
-            # Extreme pump
+            # Extreme short-term pump
             if change5 > 100:
                 risk += 15
 
-            # Extreme crash
+            # Extreme short-term collapse
             if change5 < -25:
                 risk += 20
 
-            # Suspicious turnover
+            # Volume relative to liquidity
             if liquidity > 0:
 
                 turnover = volume1h / liquidity
@@ -298,149 +313,147 @@ def scan():
                     risk += 7
 
             risk = int(
-                max(0, min(100, risk))
+                max(
+                    0,
+                    min(100, risk)
+                )
             )
 
-            # ========================================
+            # ====================================================
             # MOONSHOT SIGNAL
-            # ========================================
+            # ====================================================
 
-            signal = (
-                momentum * .70
-                + (100 - risk) * .30
+            moonshot = (
+                momentum * 0.70
+                + (100 - risk) * 0.30
             ) / 10
 
             # Hard penalties
             if liquidity < 5000:
-                signal -= 1.5
+                moonshot -= 1.5
 
             if risk >= 75:
-                signal -= 1.5
+                moonshot -= 1.5
 
             if change5 <= -20:
-                signal -= 1
+                moonshot -= 1.0
 
-            signal = round(
-                max(1, min(10, signal)),
+            moonshot = round(
+                max(
+                    1,
+                    min(10, moonshot)
+                ),
                 1
             )
 
-            # ========================================
-            # ENTRY / EXIT ENGINE
-            # ========================================
+            # ====================================================
+            # SIGNAL / EXIT ENGINE
+            # ====================================================
 
-            # Severe danger first
             if (
                 risk >= 80
                 or liquidity < 2000
             ):
-
                 status = "🚨 DANGER"
 
-            # Strong deterioration
+            elif change5 <= -25:
+                status = "🔴 EXIT WARNING"
+
             elif (
                 change5 <= -15
                 and sells5 > buys5
             ):
-
                 status = "🔴 EXIT WARNING"
 
-            # Price collapsing even if buys look active
-            elif change5 <= -25:
+            elif (
+                change5 <= -10
+                and momentum < 60
+            ):
+                status = "🟡 COOLING"
 
-                status = "🔴 COOLING FAST"
-
-            # Strong breakout conditions
             elif (
                 momentum >= 80
                 and risk <= 45
-                and buy_ratio5 >= .60
+                and buy_ratio5 >= 0.60
                 and change5 > 0
             ):
-
                 status = "🔥 BREAKOUT"
 
-            # Early acceleration
             elif (
                 momentum >= 65
                 and risk <= 60
-                and buy_ratio5 >= .55
+                and buy_ratio5 >= 0.55
                 and change5 > 0
             ):
-
                 status = "🟢 BUILDING"
 
-            # Momentum but no confirmation
             elif momentum >= 55:
-
                 status = "👀 WATCH"
 
             else:
-
                 status = "⚪ WEAK"
 
-            rows.append({
+            # ====================================================
+            # FOMO-COMPATIBILITY SCREEN
+            # ====================================================
 
-                "Token":
-                    pair.get(
-                        "baseToken", {}
-                    ).get("symbol", "???"),
+            # This does NOT claim Fomo itself has confirmed the token.
+            # It means the token has the basic Solana market conditions
+            # we want before manually searching its contract in Fomo.
 
-                "Age":
-                    display_age(age),
+            if (
+                liquidity >= 5000
+                and buys5 > 0
+                and sells5 > 0
+                and address
+            ):
+                fomo_status = "🔎 Search contract in Fomo"
+            else:
+                fomo_status = "❌ Excluded"
 
-                "Moonshot":
-                    signal,
-
-                "Momentum":
-                    momentum,
-
-                "Risk":
-                    risk,
-
-                "Market Cap":
-                    round(market_cap),
-
-                "Liquidity":
-                    round(liquidity),
-
-                "5m Volume":
-                    round(volume5),
-
-                "5m Buys":
-                    int(buys5),
-
-                "5m Sells":
-                    int(sells5),
-
-                "Buy %":
-                    round(
+            rows.append(
+                {
+                    "Token": symbol,
+                    "Age": display_age(age),
+                    "Moonshot": moonshot,
+                    "Momentum": momentum,
+                    "Risk": risk,
+                    "Market Cap": round(market_cap),
+                    "Liquidity": round(liquidity),
+                    "5m Volume": round(volume5),
+                    "1h Volume": round(volume1h),
+                    "5m Buys": int(buys5),
+                    "5m Sells": int(sells5),
+                    "Buy %": round(
                         buy_ratio5 * 100,
                         1
                     ),
+                    "5m Change %": round(
+                        change5,
+                        2
+                    ),
+                    "1h Change %": round(
+                        change1h,
+                        2
+                    ),
+                    "Status": status,
+                    "Fomo": fomo_status,
+                    "Address": address
+                }
+            )
 
-                "5m Change %":
-                    round(change5, 2),
+        except requests.RequestException:
+            continue
 
-                "1h Change %":
-                    round(change1h, 2),
-
-                "Status":
-                    status,
-
-                "Address":
-                    address
-            })
-
-        except:
+        except Exception:
             continue
 
     return pd.DataFrame(rows)
 
 
-# ------------------------------------------------
+# ============================================================
 # DASHBOARD
-# ------------------------------------------------
+# ============================================================
 
 try:
 
@@ -449,10 +462,14 @@ try:
     if tokens.empty:
 
         st.warning(
-            "No Solana tokens currently available."
+            "No Solana tokens are currently available from the scanner."
         )
 
     else:
+
+        # --------------------------------------------------------
+        # SIDEBAR
+        # --------------------------------------------------------
 
         st.sidebar.header(
             "🎯 Scanner Filters"
@@ -460,12 +477,12 @@ try:
 
         max_risk = st.sidebar.slider(
             "Maximum Risk",
-            0,
-            100,
-            60
+            min_value=0,
+            max_value=100,
+            value=60
         )
 
-        min_liq = st.sidebar.number_input(
+        min_liquidity = st.sidebar.number_input(
             "Minimum Liquidity ($)",
             min_value=0,
             value=5000,
@@ -474,78 +491,125 @@ try:
 
         min_signal = st.sidebar.slider(
             "Minimum Moonshot Signal",
-            1.0,
-            10.0,
-            4.0,
-            .1
+            min_value=1.0,
+            max_value=10.0,
+            value=4.0,
+            step=0.1
         )
 
-       filtered = tokens[
-    (tokens["Risk"] <= max_risk)
-    &
-    (tokens["Liquidity"] >= min_liq)
-    &
-    (tokens["Moonshot"] >= min_signal)
-    &
-    (tokens["5m Buys"] > 0)
-    &
-    (tokens["5m Sells"] > 0)
-].copy()
+        if st.sidebar.button(
+            "🔄 Refresh Data",
+            use_container_width=True
+        ):
+            st.cache_data.clear()
+            st.rerun()
 
-filtered["Fomo"] = "🔎 Search contract in Fomo"
+        # --------------------------------------------------------
+        # MAIN FILTER
+        # --------------------------------------------------------
+
+        filtered = tokens[
+            (tokens["Risk"] <= max_risk)
+            &
+            (tokens["Liquidity"] >= min_liquidity)
+            &
+            (tokens["Moonshot"] >= min_signal)
+            &
+            (tokens["5m Buys"] > 0)
+            &
+            (tokens["5m Sells"] > 0)
+            &
+            (tokens["Fomo"] != "❌ Excluded")
+        ].copy()
 
         filtered = filtered.sort_values(
             ["Moonshot", "Momentum"],
             ascending=False
         )
 
-        c1, c2, c3, c4 = st.columns(4)
+        # --------------------------------------------------------
+        # TOP METRICS
+        # --------------------------------------------------------
 
-        c1.metric(
+        col1, col2, col3, col4 = st.columns(4)
+
+        col1.metric(
             "🔥 Passing Filters",
             len(filtered)
         )
 
-        c2.metric(
+        col2.metric(
             "🚀 Highest Signal",
             (
-                f"{filtered['Moonshot'].max()}/10"
-                if len(filtered)
+                f"{filtered['Moonshot'].max():.1f}/10"
+                if not filtered.empty
                 else "—"
             )
         )
 
-        c3.metric(
+        col3.metric(
             "📈 Highest Momentum",
             (
-                f"{filtered['Momentum'].max()}/100"
-                if len(filtered)
+                f"{int(filtered['Momentum'].max())}/100"
+                if not filtered.empty
                 else "—"
             )
         )
 
-        c4.metric(
+        col4.metric(
             "🛡️ Lowest Risk",
             (
-                f"{filtered['Risk'].min()}/100"
-                if len(filtered)
+                f"{int(filtered['Risk'].min())}/100"
+                if not filtered.empty
                 else "—"
             )
         )
+
+        # --------------------------------------------------------
+        # OPPORTUNITY FEED
+        # --------------------------------------------------------
 
         st.subheader(
             "🔥 Live Opportunity Feed"
         )
 
-        st.dataframe(
-            filtered,
-            use_container_width=True,
-            hide_index=True
-        )
+        if filtered.empty:
 
-        # ========================================
-        # BEST CURRENT SETUPS
-        # ========================================
+            st.info(
+                "Nothing currently passes all of your filters. "
+                "The scanner will not force a recommendation."
+            )
+
+        else:
+
+            display_columns = [
+                "Token",
+                "Age",
+                "Moonshot",
+                "Momentum",
+                "Risk",
+                "Market Cap",
+                "Liquidity",
+                "5m Volume",
+                "5m Buys",
+                "5m Sells",
+                "Buy %",
+                "5m Change %",
+                "1h Change %",
+                "Status",
+                "Fomo",
+                "Address"
+            ]
+
+            st.dataframe(
+                filtered[display_columns],
+                use_container_width=True,
+                hide_index=True
+            )
+
+        # --------------------------------------------------------
+        # BREAKOUT / BUILDING CANDIDATES
+        # --------------------------------------------------------
 
         candidates = filtered[
             filtered["Status"].isin(
@@ -556,7 +620,7 @@ filtered["Fomo"] = "🔎 Search contract in Fomo"
             )
         ]
 
-        if len(candidates):
+        if not candidates.empty:
 
             st.subheader(
                 "🚀 Current Momentum Setups"
@@ -568,40 +632,50 @@ filtered["Fomo"] = "🔎 Search contract in Fomo"
                     f"""
 **{coin['Token']}**
 
-🚀 Signal: **{coin['Moonshot']}/10**  
+Status: **{coin['Status']}**
+
+🚀 Moonshot Signal: **{coin['Moonshot']}/10**  
 📈 Momentum: **{coin['Momentum']}/100**  
 🛡️ Risk: **{coin['Risk']}/100**  
 💧 Liquidity: **${coin['Liquidity']:,}**  
+📊 5m Volume: **${coin['5m Volume']:,}**  
 🟢 5m Buys: **{coin['5m Buys']}**  
 🔴 5m Sells: **{coin['5m Sells']}**  
 ⚖️ Buy Ratio: **{coin['Buy %']}%**  
-📊 5m Price: **{coin['5m Change %']}%**
+📈 5m Price: **{coin['5m Change %']}%**
 
-**{coin['Status']}**
+**Fomo check:** {coin['Fomo']}
+
+**Contract:** `{coin['Address']}`
 """
                 )
 
-        # ========================================
-        # EXIT WARNINGS
-        # ========================================
+        # --------------------------------------------------------
+        # DETERIORATION MONITOR
+        # --------------------------------------------------------
 
-        exits = tokens[
+        danger_tokens = tokens[
             tokens["Status"].isin(
                 [
+                    "🟡 COOLING",
                     "🔴 EXIT WARNING",
-                    "🔴 COOLING FAST",
                     "🚨 DANGER"
                 ]
             )
-        ]
+        ].copy()
 
-        if len(exits):
+        if not danger_tokens.empty:
+
+            danger_tokens = danger_tokens.sort_values(
+                ["Risk", "5m Change %"],
+                ascending=[False, True]
+            )
 
             st.subheader(
                 "⚠️ Deterioration Monitor"
             )
 
-            for _, coin in exits.head(5).iterrows():
+            for _, coin in danger_tokens.head(5).iterrows():
 
                 st.error(
                     f"""
@@ -610,35 +684,59 @@ filtered["Fomo"] = "🔎 Search contract in Fomo"
 Status: **{coin['Status']}**  
 5m Price: **{coin['5m Change %']}%**  
 Buy Ratio: **{coin['Buy %']}%**  
+Momentum: **{coin['Momentum']}/100**  
 Risk: **{coin['Risk']}/100**
 """
                 )
 
         st.caption(
-            "Scanner data refreshes approximately every 20 seconds."
+            "Data is cached for 20 seconds. Use Refresh Data to request a new scan."
         )
+
+except requests.RequestException as error:
+
+    st.error(
+        "DexScreener could not be reached."
+    )
+
+    st.code(str(error))
 
 except Exception as error:
 
     st.error(
-        "Scanner failed to load."
+        "The scanner failed to load."
     )
 
     st.code(str(error))
 
 
+# ============================================================
+# DEVELOPMENT NOTICE
+# ============================================================
+
 st.divider()
 
-st.subheader("🧪 Development Status")
+st.subheader(
+    "🧪 Development Status"
+)
 
-st.write("""
-This version distinguishes between **BUILDING, BREAKOUT, WATCH,
-COOLING, EXIT WARNING and DANGER** conditions.
+st.write(
+    """
+The scanner analyzes live Solana market activity and separates
+BUILDING, BREAKOUT, WATCH, COOLING, EXIT WARNING and DANGER conditions.
 
-The Moonshot score measures relative signal strength. It is **not**
-the probability of a 50,000% or 100,000% return.
+**Fomo:** A token shown in the Opportunity Feed has an active Solana
+market, sufficient configured liquidity, recent buys and recent sells.
+The contract address is provided so it can be searched in Fomo.
 
-The next major step is historical tracking/backtesting. Until we have
-measured how these signals perform over many launches, they should be
-treated as experimental rather than reliable trading recommendations.
-""")
+This does **not** mean Fomo has independently confirmed that the token
+is executable at that exact moment.
+
+The Moonshot score is a relative experimental signal score — not the
+probability of a 50,000% or 100,000% return.
+
+The scoring system has not yet been validated through sufficient
+historical testing. The next major upgrade is outcome tracking so the
+app can measure what happens after a token is detected.
+"""
+)
