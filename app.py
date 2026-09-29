@@ -480,13 +480,19 @@ try:
             .1
         )
 
-        filtered = tokens[
-            (tokens["Risk"] <= max_risk)
-            &
-            (tokens["Liquidity"] >= min_liq)
-            &
-            (tokens["Moonshot"] >= min_signal)
-        ]
+       filtered = tokens[
+    (tokens["Risk"] <= max_risk)
+    &
+    (tokens["Liquidity"] >= min_liq)
+    &
+    (tokens["Moonshot"] >= min_signal)
+    &
+    (tokens["5m Buys"] > 0)
+    &
+    (tokens["5m Sells"] > 0)
+].copy()
+
+filtered["Fomo"] = "🔎 Search contract in Fomo"
 
         filtered = filtered.sort_values(
             ["Moonshot", "Momentum"],
